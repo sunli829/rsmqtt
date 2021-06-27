@@ -1,0 +1,14 @@
+[package]
+name = "rsmqtt_bench"
+version = "0.1.0"
+edition = "2018"
+
+[dependencies]
+anyhow = "1.0.41"
+bytes = "1.0.1"
+mqttv5 = { path = "../../libs/mqttv5", package = "rsmqttd-v5" }
+
+structopt = "0.3.21"
+tokio = { version = "1.7.1", features = ["rt-multi-thread", "net", "macros", "sync"] }
+bytestring = "1.0.0"
+bytesize = "1.0.1"

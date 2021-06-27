@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "libs/mqttv5",
+
+    "apps/rsmqttd",
+    "apps/rsmqtt_bench",
+]
