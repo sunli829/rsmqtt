@@ -4,12 +4,16 @@ mod defaults;
 mod error;
 mod filter;
 mod message;
+mod metrics;
 mod server;
 mod storage;
+mod sys_topics;
+mod ws_transport;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use structopt::StructOpt;
@@ -20,6 +24,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
 
 use config::{Config, StorageConfig};
+use metrics::InternalMetrics;
 use server::ServerState;
 use storage::Storage;
 
@@ -80,7 +85,15 @@ async fn run() -> Result<()> {
         connections: RwLock::new(HashMap::new()),
         storage,
         session_timeouts: Mutex::new(HashMap::new()),
+        metrics: Arc::new(InternalMetrics::default()),
     });
+
+    if state.config.server.sys_update_interval > 0 {
+        tokio::spawn(sys_topics::update_loop(
+            state.clone(),
+            Duration::from_secs(state.config.server.sys_update_interval),
+        ));
+    }
 
     server::run(state).await
 }

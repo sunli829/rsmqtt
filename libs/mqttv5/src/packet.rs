@@ -47,13 +47,16 @@ impl Packet {
         mut reader: impl AsyncRead + Unpin,
         data: &mut BytesMut,
         max_size: Option<u32>,
-    ) -> Result<Option<Self>, DecodeError> {
+    ) -> Result<Option<(Self, usize)>, DecodeError> {
         let flag = match reader.read_u8().await {
             Ok(flag) => flag,
             Err(err) if err.kind() == ErrorKind::UnexpectedEof => return Ok(None),
             Err(err) => return Err(err.into()),
         };
-        let len = read_remaining_length(&mut reader).await?;
+        let mut packet_size = 1;
+        let (len, bytes_len) = read_remaining_length(&mut reader).await?;
+
+        packet_size += bytes_len;
 
         if matches!(max_size, Some(max_size) if len > max_size as usize) {
             return Err(DecodeError::PacketTooLarge);
@@ -64,6 +67,8 @@ impl Packet {
             .read_exact(&mut *data)
             .await
             .map_err(|_| DecodeError::MalformedPacket)?;
+        packet_size += data.len();
+
         let packet = match (flag & 0xf0) >> 4 {
             RESERVED => return Err(DecodeError::ReservedPacketType),
             CONNECT => Self::Connect(Connect::decode(data.split().freeze())?),
@@ -82,7 +87,7 @@ impl Packet {
             DISCONNECT => Self::Disconnect(Disconnect::decode(data.split().freeze())?),
             n => return Err(DecodeError::UnknownPacketType(n)),
         };
-        Ok(Some(packet))
+        Ok(Some((packet, packet_size)))
     }
 
     fn encode(&self, data: &mut BytesMut) -> Result<(), EncodeError> {
@@ -111,12 +116,16 @@ impl Packet {
     }
 }
 
-async fn read_remaining_length(mut reader: impl AsyncRead + Unpin) -> Result<usize, DecodeError> {
+async fn read_remaining_length(
+    mut reader: impl AsyncRead + Unpin,
+) -> Result<(usize, usize), DecodeError> {
     let mut n = 0;
     let mut shift = 0;
+    let mut bytes = 0;
 
     loop {
         let byte = reader.read_u8().await?;
+        bytes += 1;
         n += ((byte & 0x7f) as usize) << shift;
         let done = (byte & 0x80) == 0;
         if done {
@@ -126,7 +135,7 @@ async fn read_remaining_length(mut reader: impl AsyncRead + Unpin) -> Result<usi
         ensure!(shift <= 21, DecodeError::MalformedPacket);
     }
 
-    Ok(n)
+    Ok((n, bytes))
 }
 
 pub struct PacketEncoder<W> {
@@ -150,15 +159,16 @@ impl<W> PacketEncoder<W> {
 }
 
 impl<W: AsyncWrite + Unpin> PacketEncoder<W> {
-    pub async fn encode(&mut self, packet: &Packet) -> Result<(), EncodeError> {
+    pub async fn encode(&mut self, packet: &Packet) -> Result<usize, EncodeError> {
         packet.encode(&mut self.data)?;
         let data = self.data.split();
+        let packet_size = data.len();
         if let Some(max_size) = self.max_size {
             if data.len() > max_size as usize {
                 return Err(EncodeError::PacketTooLarge);
             }
         }
         self.writer.write_all(&*data).await?;
-        Ok(())
+        Ok(packet_size)
     }
 }

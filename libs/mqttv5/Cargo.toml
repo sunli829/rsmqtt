@@ -2,6 +2,7 @@
 name = "rsmqttd-v5"
 version = "0.1.0"
 edition = "2018"
+license = "GPL-3.0"
 
 [dependencies]
 bytes = "1.0.1"

@@ -11,6 +11,16 @@ use tokio::sync::Notify;
 use crate::filter::TopicFilter;
 use crate::message::Message;
 
+#[derive(Debug)]
+pub struct StorageMetrics {
+    pub session_count: usize,
+    pub inflight_messages_count: usize,
+    pub retained_messages_count: usize,
+    pub messages_count: usize,
+    pub messages_bytes: usize,
+    pub subscriptions_count: usize,
+}
+
 #[async_trait::async_trait]
 pub trait Storage: Send + Sync + 'static {
     async fn update_retained_message(&self, topic: ByteString, msg: Message) -> Result<()>;
@@ -79,4 +89,6 @@ pub trait Storage: Send + Sync + 'static {
         packet_id: NonZeroU16,
         remove: bool,
     ) -> Result<Option<Message>>;
+
+    async fn metrics(&self) -> Result<StorageMetrics>;
 }

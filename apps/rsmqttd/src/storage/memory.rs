@@ -12,7 +12,7 @@ use tokio::sync::Notify;
 
 use crate::filter::TopicFilter;
 use crate::message::Message;
-use crate::storage::Storage;
+use crate::storage::{Storage, StorageMetrics};
 
 macro_rules! session_not_found {
     ($client_id:expr) => {
@@ -38,7 +38,7 @@ impl Deref for Filter {
 struct Session {
     queue: VecDeque<Message>,
     notify: Arc<Notify>,
-    subscribe_filters: HashMap<ByteString, Filter>,
+    subscription_filters: HashMap<ByteString, Filter>,
     last_will: Option<LastWill>,
     session_expiry_interval: u32,
     last_will_expiry_interval: u32,
@@ -52,15 +52,15 @@ struct StorageMemoryInner {
 
     sessions: HashMap<ByteString, RwLock<Session>>,
 
-    /// All of the share subscribes
+    /// All of the share subscriptions
     ///
     /// share name -> client id -> path -> filter
-    share_subscribes: HashMap<String, HashMap<String, HashMap<ByteString, Filter>>>,
+    share_subscriptions: HashMap<String, HashMap<String, HashMap<ByteString, Filter>>>,
 }
 
 impl StorageMemoryInner {
-    fn add_share_subscribe(&mut self, share_name: &str, client_id: &str, filter: Filter) {
-        self.share_subscribes
+    fn add_share_subscription(&mut self, share_name: &str, client_id: &str, filter: Filter) {
+        self.share_subscriptions
             .entry(share_name.to_string())
             .or_default()
             .entry(client_id.to_string())
@@ -68,9 +68,9 @@ impl StorageMemoryInner {
             .insert(filter.path.clone(), filter);
     }
 
-    fn remove_share_subscribe(&mut self, share_name: &str, client_id: &str, path: &str) -> bool {
+    fn remove_share_subscription(&mut self, share_name: &str, client_id: &str, path: &str) -> bool {
         let mut res = false;
-        if let Some(clients) = self.share_subscribes.get_mut(share_name) {
+        if let Some(clients) = self.share_subscriptions.get_mut(share_name) {
             if let Some(filters) = clients.get_mut(client_id) {
                 res = filters.remove(path).is_some();
                 if filters.is_empty() {
@@ -78,7 +78,7 @@ impl StorageMemoryInner {
                 }
             }
             if clients.is_empty() {
-                self.share_subscribes.remove(share_name);
+                self.share_subscriptions.remove(share_name);
             }
         }
         res
@@ -94,7 +94,7 @@ pub struct StorageMemory {
 impl Storage for StorageMemory {
     async fn update_retained_message(&self, topic: ByteString, msg: Message) -> Result<()> {
         let mut inner = self.inner.write();
-        if msg.payload.is_empty() {
+        if msg.is_empty() {
             inner.retain_messages.remove(&topic);
         } else {
             inner.retain_messages.insert(topic, msg);
@@ -129,7 +129,7 @@ impl Storage for StorageMemory {
             let session = RwLock::new(Session {
                 queue: VecDeque::new(),
                 notify: Arc::new(Notify::new()),
-                subscribe_filters: HashMap::new(),
+                subscription_filters: HashMap::new(),
                 last_will,
                 session_expiry_interval,
                 last_will_expiry_interval,
@@ -155,7 +155,7 @@ impl Storage for StorageMemory {
         if inner.sessions.remove(client_id).is_some() {
             found = true;
         }
-        for clients in inner.share_subscribes.values_mut() {
+        for clients in inner.share_subscriptions.values_mut() {
             clients.remove(client_id);
         }
         Ok(found)
@@ -179,7 +179,7 @@ impl Storage for StorageMemory {
             if !inner.sessions.contains_key(client_id) {
                 session_not_found!(client_id)
             }
-            inner.add_share_subscribe(&share_name, client_id, filter);
+            inner.add_share_subscription(&share_name, client_id, filter);
             Ok(())
         } else {
             let inner = self.inner.read();
@@ -188,7 +188,7 @@ impl Storage for StorageMemory {
                 let mut session = session.write();
 
                 let is_new_subscribe = session
-                    .subscribe_filters
+                    .subscription_filters
                     .insert(filter.path.clone(), filter.clone())
                     .is_some();
 
@@ -232,12 +232,12 @@ impl Storage for StorageMemory {
             if !inner.sessions.contains_key(client_id) {
                 session_not_found!(client_id)
             }
-            Ok(inner.remove_share_subscribe(share_name, client_id, &path))
+            Ok(inner.remove_share_subscription(share_name, client_id, &path))
         } else {
             let inner = self.inner.read();
             if let Some(session) = inner.sessions.get(client_id) {
                 let mut session = session.write();
-                return Ok(session.subscribe_filters.remove(path).is_some());
+                return Ok(session.subscription_filters.remove(path).is_some());
             }
             session_not_found!(client_id)
         }
@@ -300,7 +300,7 @@ impl Storage for StorageMemory {
                 for (client_id, session) in inner.sessions.iter() {
                     let session = session.upgradable_read();
                     if let Some(msg) =
-                        filter_message(client_id, &msg, session.subscribe_filters.values())
+                        filter_message(client_id, &msg, session.subscription_filters.values())
                     {
                         let mut session = RwLockUpgradableReadGuard::upgrade(session);
                         session.queue.push_back(msg);
@@ -309,7 +309,7 @@ impl Storage for StorageMemory {
                 }
 
                 matched_clients.clear();
-                for clients in inner.share_subscribes.values() {
+                for clients in inner.share_subscriptions.values() {
                     for (client_id, filters) in clients {
                         if let Some(msg) = filter_message(client_id, &msg, filters.values()) {
                             matched_clients.push((client_id, msg));
@@ -419,6 +419,53 @@ impl Storage for StorageMemory {
         }
         session_not_found!(client_id)
     }
+
+    async fn metrics(&self) -> Result<StorageMetrics> {
+        let inner = self.inner.read();
+        Ok(StorageMetrics {
+            session_count: inner.sessions.len(),
+            inflight_messages_count: inner
+                .sessions
+                .values()
+                .map(|session| session.read().inflight_messages.len())
+                .sum::<usize>(),
+            retained_messages_count: inner.retain_messages.len(),
+            messages_count: inner.retain_messages.len()
+                + inner
+                    .sessions
+                    .values()
+                    .map(|session| session.read().queue.len())
+                    .sum::<usize>(),
+            messages_bytes: inner
+                .retain_messages
+                .values()
+                .map(|msg| msg.payload().len())
+                .sum::<usize>()
+                + inner
+                    .sessions
+                    .values()
+                    .map(|session| {
+                        session
+                            .read()
+                            .queue
+                            .iter()
+                            .map(|msg| msg.payload().len())
+                            .sum::<usize>()
+                    })
+                    .sum::<usize>(),
+            subscriptions_count: inner
+                .share_subscriptions
+                .values()
+                .map(|clients| clients.values().map(|subscriptions| subscriptions.len()))
+                .flatten()
+                .sum::<usize>()
+                + inner
+                    .sessions
+                    .values()
+                    .map(|session| session.read().subscription_filters.len())
+                    .sum::<usize>(),
+        })
+    }
 }
 
 fn filter_message<'a>(
@@ -428,15 +475,15 @@ fn filter_message<'a>(
 ) -> Option<Message> {
     let mut matched = false;
     let mut max_qos = Qos::AtMostOnce;
-    let mut retain = msg.retain;
+    let mut retain = msg.is_retain();
     let mut ids = Vec::new();
 
     for filter in filters {
-        if filter.no_local && msg.publisher.as_deref() == Some(client_id) {
+        if filter.no_local && msg.publisher().map(|s| &**s) == Some(client_id) {
             continue;
         }
 
-        if !filter.topic_filter.matches(&msg.topic) {
+        if !filter.topic_filter.matches(msg.topic()) {
             continue;
         }
 
@@ -454,10 +501,14 @@ fn filter_message<'a>(
     }
 
     if matched {
-        let mut msg = msg.clone();
-        msg.qos = msg.qos.min(max_qos);
-        msg.retain = retain;
-        msg.properties.subscription_identifiers = ids;
+        let mut properties = msg.properties().clone();
+        properties.subscription_identifiers = ids;
+        let msg = Message::new(
+            msg.topic().clone(),
+            msg.qos().min(max_qos),
+            msg.payload().clone(),
+        )
+        .with_retain(retain);
         Some(msg)
     } else {
         None

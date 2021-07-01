@@ -106,7 +106,7 @@ async fn client_loop(
         }))
         .await?;
 
-    let packet = Packet::decode(&mut read_half, &mut decode_buf, None)
+    let (packet, _) = Packet::decode(&mut read_half, &mut decode_buf, None)
         .await?
         .ok_or_else(|| anyhow::anyhow!("protocol error"))?;
     let conn_ack = match packet {
@@ -143,7 +143,7 @@ async fn client_loop(
             }))
             .await?;
 
-        let packet = Packet::decode(&mut read_half, &mut decode_buf, None)
+        let (packet, _) = Packet::decode(&mut read_half, &mut decode_buf, None)
             .await?
             .ok_or_else(|| anyhow::anyhow!("protocol error"))?;
         match packet {

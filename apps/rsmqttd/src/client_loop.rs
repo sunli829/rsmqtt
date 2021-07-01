@@ -63,7 +63,14 @@ impl<W: AsyncWrite + Unpin> Connection<W> {
             "send packet",
         );
         match self.encoder.encode(packet).await {
-            Ok(()) => Ok(()),
+            Ok(packet_size) => {
+                self.state.metrics.inc_msgs_sent(1);
+                self.state.metrics.inc_bytes_sent(packet_size);
+                if let Packet::Publish(publish) = packet {
+                    self.state.metrics.inc_pub_bytes_sent(publish.payload.len());
+                }
+                Ok(())
+            }
             Err(EncodeError::PayloadTooLarge) => {
                 Err(MqttError::new(DisconnectReasonCode::PacketTooLarge).into())
             }
@@ -276,6 +283,7 @@ impl<W: AsyncWrite + Unpin> Connection<W> {
             properties: conn_ack_properties,
         }))
         .await?;
+        self.state.metrics.inc_connection_count(1);
 
         // retry send inflight messages
         match self
@@ -309,6 +317,11 @@ impl<W: AsyncWrite + Unpin> Connection<W> {
             Some(client_id) => client_id,
             None => return Err(MqttError::new(DisconnectReasonCode::ProtocolError).into()),
         };
+
+        self.state
+            .metrics
+            .inc_pub_bytes_received(publish.payload.len());
+        self.state.metrics.inc_pub_msgs_received(1);
 
         if matches!((
             self.state.config.server.topic_alias_max,
@@ -371,14 +384,15 @@ impl<W: AsyncWrite + Unpin> Connection<W> {
         let packet_id = publish.packet_id;
 
         // create message
-        let msg = Message::from_publish(Some(client_id.clone()), publish);
+        let msg = Message::from_publish(Some(client_id.clone()), publish)
+            .with_publisher(client_id.clone());
 
         if retain {
             // update retained message
             if let Err(err) = self
                 .state
                 .storage
-                .update_retained_message(msg.topic.clone(), msg.clone())
+                .update_retained_message(msg.topic().clone(), msg.clone())
                 .await
             {
                 tracing::warn!(
@@ -388,7 +402,7 @@ impl<W: AsyncWrite + Unpin> Connection<W> {
             }
         }
 
-        match msg.qos {
+        match msg.qos() {
             Qos::AtMostOnce => {
                 if let Err(err) = self.state.storage.publish(vec![msg]).await {
                     tracing::error!(
@@ -415,6 +429,7 @@ impl<W: AsyncWrite + Unpin> Connection<W> {
             }
             Qos::ExactlyOnce => {
                 if self.receive_in_quota == 0 {
+                    self.state.metrics.inc_msg_dropped(1);
                     self.send_packet(&Packet::PubRec(PubRec {
                         packet_id: packet_id.unwrap(),
                         reason_code: PubRecReasonCode::QuotaExceeded,
@@ -748,6 +763,7 @@ impl<W: AsyncWrite + Unpin> Connection<W> {
             Control::SessionTakenOver(reply) => {
                 if let Some(client_id) = self.client_id.take() {
                     self.state.connections.write().await.remove(&client_id);
+                    self.state.metrics.dec_connection_count(1);
                 }
                 reply.send(()).ok();
                 Err(Error::SessionTakeOver)
@@ -782,7 +798,7 @@ impl<W: AsyncWrite + Unpin> Connection<W> {
             let mut publish_err = None;
             let mut consume_count = 0;
             for msg in msgs {
-                let qos = msg.qos;
+                let qos = msg.qos();
 
                 if let Err(err) = self.publish_to_client(msg).await {
                     publish_err = Some(err);
@@ -830,16 +846,14 @@ impl<W: AsyncWrite + Unpin> Connection<W> {
             None => return Ok(()),
         };
 
-        let message_expiry_interval = match msg.message_expiry_interval() {
-            Some((true, interval)) => Some(interval),
-            Some((false, _)) => return Ok(()),
-            None => None,
+        let mut publish = match msg.to_publish_and_update_expiry_interval() {
+            Some(publish) => publish,
+            None => return Ok(()),
         };
 
-        let mut publish = msg.to_publish();
-        publish.properties.message_expiry_interval = message_expiry_interval;
+        self.state.metrics.inc_pub_msgs_sent(1);
 
-        match msg.qos {
+        match publish.qos {
             Qos::AtMostOnce => self.send_packet(&Packet::Publish(publish)).await,
             Qos::AtLeastOnce | Qos::ExactlyOnce => {
                 let packet_id = self.take_packet_id();
@@ -876,6 +890,8 @@ pub async fn run(
     remote_addr: String,
     state: Arc<ServerState>,
 ) {
+    state.metrics.inc_socket_connections(1);
+
     let (control_sender, mut control_receiver) = mpsc::unbounded_channel();
     let mut connection = Connection {
         state: state.clone(),
@@ -915,7 +931,9 @@ pub async fn run(
             }
             res = Packet::decode(&mut reader, &mut data, connection.max_packet_size_in) => {
                 match res {
-                    Ok(Some(packet)) => {
+                    Ok(Some((packet, packet_size))) => {
+                        connection.state.metrics.inc_bytes_received(packet_size);
+                        connection.state.metrics.inc_msgs_received(1);
                         connection.last_active = Instant::now();
                         tracing::debug!(
                             remote_addr = %connection.remote_addr,
@@ -1045,7 +1063,15 @@ pub async fn run(
                     client_id = %client_id,
                     "session timeout",
                 );
+
+                if let Err(err) = state.storage.remove_session(&client_id).await {
+                    tracing::error!(
+                        error = %err,
+                        "failed to remove session",
+                    )
+                }
                 state.session_timeouts.lock().await.remove(&client_id);
+                state.metrics.inc_clients_expired(1);
             }
         });
         connection
@@ -1054,5 +1080,9 @@ pub async fn run(
             .lock()
             .await
             .insert(client_id, session_timeout_handle);
+
+        connection.state.metrics.dec_connection_count(1);
     }
+
+    state.metrics.dec_socket_connections(1);
 }

@@ -2,6 +2,7 @@
 name = "rsmqttd"
 version = "0.1.0"
 edition = "2018"
+license = "GPL-3.0"
 
 [dependencies]
 mqttv5 = { path = "../../libs/mqttv5", package = "rsmqttd-v5" }
@@ -28,3 +29,4 @@ tokio-rustls = "0.22.0"
 warp = "0.3.1"
 tokio-util = "0.6.7"
 futures-util = { version = "0.3.15", features = ["sink"] }
+version = "3.0.0"

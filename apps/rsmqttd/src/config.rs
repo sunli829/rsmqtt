@@ -35,14 +35,17 @@ impl TcpConfig {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct WebsocketConfig {
+pub struct HttpConfig {
     #[serde(default = "default_host")]
     pub host: String,
     pub port: Option<u16>,
     pub tls: Option<TlsConfig>,
+    pub websocket: bool,
+    pub api: bool,
+    pub graphql_api: bool,
 }
 
-impl WebsocketConfig {
+impl HttpConfig {
     pub fn port(&self) -> u16 {
         self.port
             .unwrap_or_else(|| if self.tls.is_some() { 8443 } else { 8080 })
@@ -52,7 +55,7 @@ impl WebsocketConfig {
 #[derive(Debug, Deserialize)]
 pub struct NetworkConfig {
     pub tcp: Option<TcpConfig>,
-    pub websocket: Option<WebsocketConfig>,
+    pub http: Option<HttpConfig>,
 }
 
 impl Default for NetworkConfig {
@@ -63,10 +66,13 @@ impl Default for NetworkConfig {
                 port: None,
                 tls: None,
             }),
-            websocket: Some(WebsocketConfig {
+            http: Some(HttpConfig {
                 host: default_host(),
                 port: None,
                 tls: None,
+                websocket: true,
+                api: true,
+                graphql_api: true,
             }),
         }
     }
@@ -74,6 +80,8 @@ impl Default for NetworkConfig {
 
 #[derive(Debug, Deserialize)]
 pub struct ServerConfig {
+    #[serde(default = "default_sys_update_interval")]
+    pub sys_update_interval: u64,
     pub keep_alive: Option<u16>,
     pub session_expiry_interval: Option<u32>,
     pub receive_max: Option<u16>,
@@ -87,6 +95,7 @@ pub struct ServerConfig {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
+            sys_update_interval: 5,
             keep_alive: None,
             session_expiry_interval: None,
             receive_max: None,
@@ -119,4 +128,8 @@ fn default_host() -> String {
 
 fn default_storage_type() -> String {
     "memory".to_string()
+}
+
+fn default_sys_update_interval() -> u64 {
+    5
 }
