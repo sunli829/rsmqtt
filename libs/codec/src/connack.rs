@@ -7,7 +7,7 @@ use num_enum::{IntoPrimitive, TryFromPrimitive};
 use crate::packet::CONNACK;
 use crate::reader::PacketReader;
 use crate::writer::{bytes_remaining_length, PacketWriter};
-use crate::{property, DecodeError, EncodeError, Qos};
+use crate::{property, DecodeError, EncodeError, Level, Qos};
 
 #[derive(Debug, Clone, Copy, PartialEq, IntoPrimitive, TryFromPrimitive)]
 #[repr(u8)]
@@ -34,6 +34,47 @@ pub enum ConnectReasonCode {
     UseAnotherServer = 156,
     ServerMoved = 157,
     ConnectionRateExceeded = 159,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, IntoPrimitive, TryFromPrimitive)]
+#[repr(u8)]
+enum ConnectReasonCodeV4 {
+    Success = 0,
+    RefusedProtocolVersion = 1,
+    BadClientId = 2,
+    ServiceUnavailable = 3,
+    BadUserNamePassword = 4,
+    NotAuthorized = 5,
+}
+
+impl From<ConnectReasonCodeV4> for ConnectReasonCode {
+    fn from(reason_code: ConnectReasonCodeV4) -> Self {
+        match reason_code {
+            ConnectReasonCodeV4::Success => ConnectReasonCode::Success,
+            ConnectReasonCodeV4::RefusedProtocolVersion => {
+                ConnectReasonCode::UnsupportedProtocolVersion
+            }
+            ConnectReasonCodeV4::BadClientId => ConnectReasonCode::ClientIdentifierNotValid,
+            ConnectReasonCodeV4::ServiceUnavailable => ConnectReasonCode::ServerUnavailable,
+            ConnectReasonCodeV4::BadUserNamePassword => ConnectReasonCode::BadUserNamePassword,
+            ConnectReasonCodeV4::NotAuthorized => ConnectReasonCode::NotAuthorized,
+        }
+    }
+}
+
+impl From<ConnectReasonCode> for ConnectReasonCodeV4 {
+    fn from(reason_code: ConnectReasonCode) -> Self {
+        match reason_code {
+            ConnectReasonCode::Success => ConnectReasonCodeV4::Success,
+            ConnectReasonCode::UnsupportedProtocolVersion => {
+                ConnectReasonCodeV4::RefusedProtocolVersion
+            }
+            ConnectReasonCode::ClientIdentifierNotValid => ConnectReasonCodeV4::BadClientId,
+            ConnectReasonCode::BadUserNamePassword => ConnectReasonCodeV4::BadUserNamePassword,
+            ConnectReasonCode::NotAuthorized => ConnectReasonCodeV4::NotAuthorized,
+            _ => ConnectReasonCodeV4::ServiceUnavailable,
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -252,19 +293,32 @@ pub struct ConnAck {
 
 impl ConnAck {
     #[inline]
-    fn variable_header_length(&self) -> Result<usize, EncodeError> {
-        let properties_len = self.properties.bytes_length()?;
-        Ok(1 + 1 + bytes_remaining_length(properties_len)? + self.properties.bytes_length()?)
+    fn variable_header_length(&self, level: Level) -> Result<usize, EncodeError> {
+        let mut len = 1 + 1;
+        if level == Level::V5 {
+            let properties_len = self.properties.bytes_length()?;
+            len += bytes_remaining_length(properties_len)? + self.properties.bytes_length()?;
+        }
+        Ok(len)
     }
 
     #[inline]
-    fn payload_length(&self) -> Result<usize, EncodeError> {
+    fn payload_length(&self, _level: Level) -> Result<usize, EncodeError> {
         Ok(0)
     }
 
-    pub(crate) fn encode(&self, data: &mut BytesMut) -> Result<(), EncodeError> {
+    pub(crate) fn encode(
+        &self,
+        data: &mut BytesMut,
+        level: Level,
+        max_size: usize,
+    ) -> Result<(), EncodeError> {
         data.put_u8(CONNACK << 4);
-        data.write_remaining_length(self.variable_header_length()? + self.payload_length()?)?;
+
+        let size = self.variable_header_length(level)? + self.payload_length(level)?;
+        ensure!(size < max_size, EncodeError::PacketTooLarge);
+        data.write_remaining_length(size)?;
+
         data.put_u8({
             let mut flags = 0;
             if self.session_present {
@@ -272,31 +326,52 @@ impl ConnAck {
             }
             flags
         });
-        data.put_u8(self.reason_code.into());
 
-        data.write_remaining_length(self.properties.bytes_length()?)?;
-        self.properties.encode(data)?;
+        match level {
+            Level::V4 => {
+                data.put_u8(Into::<ConnectReasonCodeV4>::into(self.reason_code).into());
+            }
+            Level::V5 => {
+                data.put_u8(self.reason_code.into());
+                data.write_remaining_length(self.properties.bytes_length()?)?;
+                self.properties.encode(data)?;
+            }
+        }
 
         Ok(())
     }
 
-    pub(crate) fn decode(mut data: Bytes) -> Result<Self, DecodeError> {
+    pub(crate) fn decode(mut data: Bytes, level: Level) -> Result<Self, DecodeError> {
         let flag = data.read_u8()?;
         if flag & 0b11111110 > 0 {
             return Err(DecodeError::MalformedPacket);
         }
         let session_present = flag & 0x1 > 0;
         let n_reason_code = data.read_u8()?;
-        let reason_code = n_reason_code
-            .try_into()
-            .map_err(|_| DecodeError::InvalidConnAckReasonCode(n_reason_code))?;
 
-        let properties_len = data.read_remaining_length()?;
-        ensure!(
-            data.remaining() >= properties_len,
-            DecodeError::MalformedPacket
-        );
-        let properties = ConnAckProperties::decode(data.split_to(properties_len))?;
+        let (reason_code, properties) = match level {
+            Level::V4 => {
+                let reason_code = TryInto::<ConnectReasonCodeV4>::try_into(n_reason_code)
+                    .map_err(|_| DecodeError::InvalidConnAckReasonCode(n_reason_code))?
+                    .into();
+                (reason_code, ConnAckProperties::default())
+            }
+            Level::V5 => {
+                let reason_code = n_reason_code
+                    .try_into()
+                    .map_err(|_| DecodeError::InvalidConnAckReasonCode(n_reason_code))?;
+
+                let properties_len = data.read_remaining_length()?;
+                ensure!(
+                    data.remaining() >= properties_len,
+                    DecodeError::MalformedPacket
+                );
+                (
+                    reason_code,
+                    ConnAckProperties::decode(data.split_to(properties_len))?,
+                )
+            }
+        };
 
         Ok(Self {
             session_present,

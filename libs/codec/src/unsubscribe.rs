@@ -7,7 +7,7 @@ use bytestring::ByteString;
 use crate::packet::UNSUBSCRIBE;
 use crate::reader::PacketReader;
 use crate::writer::{bytes_remaining_length, PacketWriter};
-use crate::{property, DecodeError, EncodeError};
+use crate::{property, DecodeError, EncodeError, Level};
 
 #[derive(Debug, Default)]
 pub struct UnsubscribeProperties {
@@ -64,13 +64,17 @@ pub struct Unsubscribe {
 
 impl Unsubscribe {
     #[inline]
-    fn variable_header_length(&self) -> Result<usize, EncodeError> {
-        let properties_len = self.properties.bytes_length()?;
-        Ok(2 + bytes_remaining_length(properties_len)? + self.properties.bytes_length()?)
+    fn variable_header_length(&self, level: Level) -> Result<usize, EncodeError> {
+        let mut len = 2;
+        if level == Level::V5 {
+            let properties_len = self.properties.bytes_length()?;
+            len += bytes_remaining_length(properties_len)? + self.properties.bytes_length()?;
+        }
+        Ok(len)
     }
 
     #[inline]
-    fn payload_length(&self) -> Result<usize, EncodeError> {
+    fn payload_length(&self, _level: Level) -> Result<usize, EncodeError> {
         Ok(self
             .filters
             .iter()
@@ -78,7 +82,7 @@ impl Unsubscribe {
             .sum::<usize>())
     }
 
-    pub(crate) fn decode(mut data: Bytes, flags: u8) -> Result<Self, DecodeError> {
+    pub(crate) fn decode(mut data: Bytes, level: Level, flags: u8) -> Result<Self, DecodeError> {
         if flags & 0x0f != 0b0010 {
             return Err(DecodeError::MalformedPacket);
         }
@@ -88,12 +92,16 @@ impl Unsubscribe {
             .try_into()
             .map_err(|_| DecodeError::InvalidPacketId)?;
 
-        let properties_len = data.read_remaining_length()?;
-        ensure!(
-            data.remaining() >= properties_len,
-            DecodeError::MalformedPacket
-        );
-        let properties = UnsubscribeProperties::decode(data.split_to(properties_len))?;
+        let mut properties = UnsubscribeProperties::default();
+
+        if level == Level::V5 {
+            let properties_len = data.read_remaining_length()?;
+            ensure!(
+                data.remaining() >= properties_len,
+                DecodeError::MalformedPacket
+            );
+            properties = UnsubscribeProperties::decode(data.split_to(properties_len))?;
+        }
 
         let mut filters = Vec::new();
         while data.has_remaining() {
@@ -108,13 +116,24 @@ impl Unsubscribe {
         })
     }
 
-    pub(crate) fn encode(&self, data: &mut BytesMut) -> Result<(), EncodeError> {
+    pub(crate) fn encode(
+        &self,
+        data: &mut BytesMut,
+        level: Level,
+        max_size: usize,
+    ) -> Result<(), EncodeError> {
         data.put_u8((UNSUBSCRIBE << 4) | 0b0010);
-        data.write_remaining_length(self.variable_header_length()? + self.payload_length()?)?;
+
+        let size = self.variable_header_length(level)? + self.payload_length(level)?;
+        ensure!(size < max_size, EncodeError::PacketTooLarge);
+        data.write_remaining_length(size)?;
 
         data.put_u16(self.packet_id.get());
-        data.write_remaining_length(self.properties.bytes_length()?)?;
-        self.properties.encode(data)?;
+
+        if level == Level::V5 {
+            data.write_remaining_length(self.properties.bytes_length()?)?;
+            self.properties.encode(data)?;
+        }
 
         for filter in &self.filters {
             data.write_string(filter)?;

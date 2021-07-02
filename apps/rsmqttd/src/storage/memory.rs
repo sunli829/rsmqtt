@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use bytestring::ByteString;
+use codec::{LastWill, Publish, Qos, RetainHandling, SubscribeFilter};
 use fnv::FnvHashMap;
-use mqttv5::{LastWill, Publish, Qos, RetainHandling, SubscribeFilter};
 use parking_lot::{RwLock, RwLockUpgradableReadGuard};
 use tokio::sync::Notify;
 
@@ -494,6 +494,8 @@ fn filter_message<'a>(
 
     for filter in filters {
         if filter.no_local && msg.publisher().map(|s| &**s) == Some(client_id) {
+            // If no local is true, Application Messages MUST NOT be forwarded to a connection with
+            // a ClientID equal to the ClientID of the publishing connection [MQTT-3.8.3-3]
             continue;
         }
 
@@ -502,9 +504,20 @@ fn filter_message<'a>(
         }
 
         if let Some(id) = filter.id {
+            // If the Client specified a Subscription Identifier for any of the overlapping
+            // subscriptions the Server MUST send those Subscription Identifiers in the message
+            // which is published as the result of the subscriptions [MQTT-3.3.4-3].
+            //
+            // If the Server sends a single copy of the message it MUST include in the PUBLISH packet
+            // the Subscription Identifiers for all matching subscriptions which have a Subscription Identifiers,
+            // their order is not significant [MQTT-3.3.4-4].
             ids.push(id);
         }
 
+        // When Clients make subscriptions with Topic Filters that include wildcards, it is possible
+        // for a Client’s subscriptions to overlap so that a published message might match multiple filters.
+        // In this case the Server MUST deliver the message to the Client respecting the maximum QoS of all
+        // the matching subscriptions [MQTT-3.3.4-2].
         max_qos = max_qos.max(filter.qos);
 
         if !filter.retain_as_published {

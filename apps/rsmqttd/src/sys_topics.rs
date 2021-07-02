@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytestring::ByteString;
-use mqttv5::Qos;
+use codec::Qos;
 use version::version;
 
 use crate::message::Message;

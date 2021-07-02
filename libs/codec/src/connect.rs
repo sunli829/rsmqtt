@@ -6,7 +6,7 @@ use bytestring::ByteString;
 use crate::packet::CONNECT;
 use crate::reader::PacketReader;
 use crate::writer::{bytes_remaining_length, PacketWriter};
-use crate::{property, DecodeError, EncodeError, Qos};
+use crate::{property, DecodeError, EncodeError, Level, Login, Qos};
 
 const CF_USERNAME: u8 = 0b10000000;
 const CF_PASSWORD: u8 = 0b01000000;
@@ -254,15 +254,10 @@ impl ConnectProperties {
     }
 }
 
-#[derive(Debug)]
-pub struct Login {
-    pub username: ByteString,
-    pub password: ByteString,
-}
-
 /// Connection Request
 #[derive(Debug)]
 pub struct Connect {
+    pub level: Level,
     pub keep_alive: u16,
     pub clean_start: bool,
     pub client_id: ByteString,
@@ -273,7 +268,7 @@ pub struct Connect {
 
 impl Connect {
     #[inline]
-    fn variable_header_length(&self) -> Result<usize, EncodeError> {
+    fn variable_header_length(&self, level: Level) -> Result<usize, EncodeError> {
         let mut len =
             // protocol
             2 + 4 +
@@ -283,21 +278,26 @@ impl Connect {
             1 +
             // keep alive
             2;
-        let properties_len = self.properties.bytes_length()?;
-        len += bytes_remaining_length(properties_len)? + self.properties.bytes_length()?;
+        if level == Level::V5 {
+            let properties_len = self.properties.bytes_length()?;
+            len += bytes_remaining_length(properties_len)? + self.properties.bytes_length()?;
+        }
         Ok(len)
     }
 
     #[inline]
-    fn payload_length(&self) -> Result<usize, EncodeError> {
+    fn payload_length(&self, level: Level) -> Result<usize, EncodeError> {
         let mut len =
             // client id
             2 + self.client_id.len();
 
         if let Some(last_will) = &self.last_will {
-            // will properties
-            let properties_len = self.properties.bytes_length()?;
-            len += bytes_remaining_length(properties_len)? + last_will.properties.bytes_length()?;
+            if level == Level::V5 {
+                // will properties
+                let properties_len = self.properties.bytes_length()?;
+                len += bytes_remaining_length(properties_len)?
+                    + last_will.properties.bytes_length()?;
+            }
 
             // will topic
             len += 2 + last_will.topic.len();
@@ -318,13 +318,15 @@ impl Connect {
         Ok(len)
     }
 
-    pub(crate) fn decode(mut data: Bytes) -> Result<Self, DecodeError> {
+    pub(crate) fn decode(mut data: Bytes, _level: Level) -> Result<Self, DecodeError> {
         // parse header
         let protocol = data.read_string()?;
         ensure!(protocol == "MQTT", DecodeError::InvalidProtocol(protocol));
 
-        let level = data.read_u8()?;
-        ensure!(level == 0x5, DecodeError::UnsupportedProtocolLevel(level));
+        let n_level = data.read_u8()?;
+        let level = n_level
+            .try_into()
+            .map_err(|_| DecodeError::UnsupportedProtocolLevel(n_level))?;
 
         let connect_flags = data.read_u8()?;
 
@@ -350,14 +352,17 @@ impl Connect {
                 .map_err(|_| DecodeError::InvalidQOS(n_qos))?
         };
         let keep_alive = data.read_u16()?;
+        let mut properties = ConnectProperties::default();
 
-        // parse properties
-        let properties_len = data.read_remaining_length()?;
-        ensure!(
-            data.remaining() >= properties_len,
-            DecodeError::MalformedPacket
-        );
-        let properties = ConnectProperties::decode(data.split_to(properties_len))?;
+        if level == Level::V5 {
+            // parse properties
+            let properties_len = data.read_remaining_length()?;
+            ensure!(
+                data.remaining() >= properties_len,
+                DecodeError::MalformedPacket
+            );
+            properties = ConnectProperties::decode(data.split_to(properties_len))?;
+        };
 
         // parse payload
         let client_id = data.read_string()?;
@@ -365,7 +370,12 @@ impl Connect {
         let last_will = if connect_flags & CF_WILL > 0 {
             let will_len = data.read_remaining_length()?;
             ensure!(data.remaining() >= will_len, DecodeError::MalformedPacket);
-            let properties = WillProperties::decode(data.split_to(will_len))?;
+
+            let mut properties = WillProperties::default();
+            if level == Level::V5 {
+                properties = WillProperties::decode(data.split_to(will_len))?;
+            }
+
             let topic = data.read_string()?;
             let payload = data.read_binary()?;
             Some(LastWill {
@@ -398,6 +408,7 @@ impl Connect {
         };
 
         Ok(Self {
+            level,
             keep_alive,
             clean_start: connect_flags & CF_CLEAN_START > 0,
             client_id,
@@ -407,9 +418,17 @@ impl Connect {
         })
     }
 
-    pub(crate) fn encode(&self, data: &mut BytesMut) -> Result<(), EncodeError> {
+    pub(crate) fn encode(
+        &self,
+        data: &mut BytesMut,
+        level: Level,
+        max_size: usize,
+    ) -> Result<(), EncodeError> {
         data.put_u8(CONNECT << 4);
-        data.write_remaining_length(self.variable_header_length()? + self.payload_length()?)?;
+
+        let size = self.variable_header_length(level)? + self.payload_length(level)?;
+        ensure!(size < max_size, EncodeError::PacketTooLarge);
+        data.write_remaining_length(size)?;
 
         // write variable header
         data.write_string("MQTT")?;
@@ -440,16 +459,20 @@ impl Connect {
         // write payload
         data.put_u16(self.keep_alive);
 
-        let properties_len = self.properties.bytes_length()?;
-        data.write_remaining_length(properties_len)?;
-        self.properties.encode(data)?;
+        if level == Level::V5 {
+            let properties_len = self.properties.bytes_length()?;
+            data.write_remaining_length(properties_len)?;
+            self.properties.encode(data)?;
+        }
 
         data.write_string(&self.client_id)?;
 
         if let Some(last_will) = &self.last_will {
-            let properties_len = last_will.properties.bytes_length()?;
-            data.write_remaining_length(properties_len)?;
-            last_will.properties.encode(data)?;
+            if level == Level::V5 {
+                let properties_len = last_will.properties.bytes_length()?;
+                data.write_remaining_length(properties_len)?;
+                last_will.properties.encode(data)?;
+            }
 
             data.write_string(&last_will.topic)?;
             data.write_binary(&last_will.payload)?;

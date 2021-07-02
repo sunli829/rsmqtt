@@ -1,3 +1,6 @@
+#![forbid(unsafe_code)]
+#![warn(default_trait_access)]
+
 use std::convert::TryInto;
 use std::sync::Arc;
 use std::time::{Duration, Instant};

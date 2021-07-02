@@ -104,12 +104,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b700ce4376041dcd0a327fd0097c41095743c4c8af8887265942faf1100bd040"
 
 [[package]]
-name = "bytesize"
-version = "1.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "81a18687293a1546b67c246452202bbbf143d239cb43494cc163da14979082da"
-
-[[package]]
 name = "bytestring"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -988,21 +982,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "rsmqtt_bench"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bytes",
- "bytesize",
- "bytestring",
- "rsmqttd-v5",
- "structopt",
- "tokio",
-]
-
-[[package]]
 name = "rsmqttd"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1014,7 +995,7 @@ dependencies = [
  "futures-util",
  "indexmap",
  "parking_lot",
- "rsmqttd-v5",
+ "rsmqttd-codec",
  "serde",
  "structopt",
  "thiserror",
@@ -1031,15 +1012,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "rsmqttd-v5"
+name = "rsmqttd-codec"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "bytes",
  "bytestring",
  "num_enum",
  "serde",
  "thiserror",
  "tokio",
+ "tokio-stream",
 ]
 
 [[package]]

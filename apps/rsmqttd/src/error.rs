@@ -1,4 +1,4 @@
-use mqttv5::{DisconnectProperties, DisconnectReasonCode, EncodeError};
+use codec::{DisconnectProperties, DisconnectReasonCode, EncodeError};
 use std::fmt::{self, Display, Formatter};
 use thiserror::Error;
 
@@ -35,11 +35,14 @@ pub enum Error {
     #[error("take over")]
     SessionTakeOver,
 
-    #[error("mqtt: {0}")]
-    Mqtt(#[from] MqttError),
+    #[error("server disconnect: {0}")]
+    ServerDisconnect(#[from] MqttError),
 
-    #[error("mqtt encode: {0}")]
-    MqttEncode(#[from] EncodeError),
+    #[error("server disconnect")]
+    ServerDisconnectWithoutReason,
+
+    #[error("encode packet: {0}")]
+    EncodePacket(#[from] EncodeError),
 
     #[error("client disconnect: {0}")]
     ClientDisconnect(MqttError),

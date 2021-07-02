@@ -1,4 +1,4 @@
-use mqttv5::Qos;
+use codec::Qos;
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize, Default)]

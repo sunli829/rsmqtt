@@ -1,13 +1,15 @@
 [package]
-name = "rsmqttd-v5"
+name = "rsmqttd-codec"
 version = "0.1.0"
 edition = "2018"
 license = "GPL-3.0"
 
 [dependencies]
+async-trait = "0.1.50"
 bytes = "1.0.1"
 bytestring = "1.0.0"
 num_enum = "0.5.1"
 serde = { version = "1.0.126", features = ["derive"] }
 thiserror = "1.0.25"
 tokio = { version = "1.7.1", features = ["io-util", "macros"] }
+tokio-stream = "0.1.6"

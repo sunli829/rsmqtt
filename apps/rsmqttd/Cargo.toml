@@ -1,11 +1,11 @@
 [package]
 name = "rsmqttd"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2018"
 license = "GPL-3.0"
 
 [dependencies]
-mqttv5 = { path = "../../libs/mqttv5", package = "rsmqttd-v5" }
+codec = { path = "../../libs/codec", package = "rsmqttd-codec" }
 
 anyhow = "1.0.41"
 tokio = { version = "1.7.1", features = ["sync", "rt-multi-thread", "time", "macros", "net", "io-util"] }

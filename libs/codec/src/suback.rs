@@ -8,7 +8,7 @@ use num_enum::{IntoPrimitive, TryFromPrimitive};
 use crate::packet::SUBACK;
 use crate::reader::PacketReader;
 use crate::writer::{bytes_remaining_length, PacketWriter};
-use crate::{property, DecodeError, EncodeError};
+use crate::{property, DecodeError, EncodeError, Level};
 
 #[derive(Debug, Default)]
 pub struct SubAckProperties {
@@ -90,6 +90,37 @@ impl SubscribeReasonCode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, IntoPrimitive, TryFromPrimitive)]
+#[repr(u8)]
+enum SubscribeReasonCodeV4 {
+    QoS0 = 0,
+    QoS1 = 1,
+    QoS2 = 2,
+    Failure = 128,
+}
+
+impl From<SubscribeReasonCodeV4> for SubscribeReasonCode {
+    fn from(reason_code: SubscribeReasonCodeV4) -> Self {
+        match reason_code {
+            SubscribeReasonCodeV4::QoS0 => SubscribeReasonCode::QoS0,
+            SubscribeReasonCodeV4::QoS1 => SubscribeReasonCode::QoS1,
+            SubscribeReasonCodeV4::QoS2 => SubscribeReasonCode::QoS2,
+            SubscribeReasonCodeV4::Failure => SubscribeReasonCode::Unspecified,
+        }
+    }
+}
+
+impl From<SubscribeReasonCode> for SubscribeReasonCodeV4 {
+    fn from(reason_code: SubscribeReasonCode) -> Self {
+        match reason_code {
+            SubscribeReasonCode::QoS0 => SubscribeReasonCodeV4::QoS0,
+            SubscribeReasonCode::QoS1 => SubscribeReasonCodeV4::QoS1,
+            SubscribeReasonCode::QoS2 => SubscribeReasonCodeV4::QoS2,
+            _ => SubscribeReasonCodeV4::Failure,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct SubAck {
     pub packet_id: NonZeroU16,
@@ -99,19 +130,32 @@ pub struct SubAck {
 
 impl SubAck {
     #[inline]
-    fn variable_header_length(&self) -> Result<usize, EncodeError> {
-        let properties_len = self.properties.bytes_length()?;
-        Ok(2 + bytes_remaining_length(properties_len)? + self.properties.bytes_length()?)
+    fn variable_header_length(&self, level: Level) -> Result<usize, EncodeError> {
+        let mut len = 2;
+        if level == Level::V5 {
+            let properties_len = self.properties.bytes_length()?;
+            len += bytes_remaining_length(properties_len)? + self.properties.bytes_length()?;
+        }
+        Ok(len)
     }
 
     #[inline]
-    fn payload_length(&self) -> Result<usize, EncodeError> {
+    fn payload_length(&self, _level: Level) -> Result<usize, EncodeError> {
         Ok(self.reason_codes.len())
     }
 
-    pub(crate) fn encode(&self, data: &mut BytesMut) -> Result<(), EncodeError> {
+    pub(crate) fn encode(
+        &self,
+        data: &mut BytesMut,
+        level: Level,
+        max_size: usize,
+    ) -> Result<(), EncodeError> {
         data.put_u8(SUBACK << 4);
-        data.write_remaining_length(self.variable_header_length()? + self.payload_length()?)?;
+
+        let size = self.variable_header_length(level)? + self.payload_length(level)?;
+        ensure!(size < max_size, EncodeError::PacketTooLarge);
+        data.write_remaining_length(size)?;
+
         data.put_u16(self.packet_id.get());
         data.write_remaining_length(self.properties.bytes_length()?)?;
         self.properties.encode(data)?;
@@ -121,27 +165,42 @@ impl SubAck {
         Ok(())
     }
 
-    pub(crate) fn decode(mut data: Bytes) -> Result<Self, DecodeError> {
+    pub(crate) fn decode(mut data: Bytes, level: Level) -> Result<Self, DecodeError> {
         let packet_id = data
             .read_u16()?
             .try_into()
             .map_err(|_| DecodeError::InvalidPacketId)?;
 
-        let properties_len = data.read_remaining_length()?;
-        ensure!(
-            data.remaining() >= properties_len,
-            DecodeError::MalformedPacket
-        );
-        let properties = SubAckProperties::decode(data.split_to(properties_len))?;
+        let mut properties = SubAckProperties::default();
+        if level == Level::V5 {
+            let properties_len = data.read_remaining_length()?;
+            ensure!(
+                data.remaining() >= properties_len,
+                DecodeError::MalformedPacket
+            );
+            properties = SubAckProperties::decode(data.split_to(properties_len))?;
+        }
 
         let mut reason_codes = Vec::new();
         while data.has_remaining() {
             let n_reason_code = data.read_u8()?;
-            reason_codes.push(
-                n_reason_code
-                    .try_into()
-                    .map_err(|_| DecodeError::InvalidSubAckReasonCode(n_reason_code))?,
-            );
+
+            match level {
+                Level::V4 => {
+                    reason_codes.push(
+                        TryInto::<SubscribeReasonCodeV4>::try_into(n_reason_code)
+                            .map_err(|_| DecodeError::InvalidSubAckReasonCode(n_reason_code))?
+                            .into(),
+                    );
+                }
+                Level::V5 => {
+                    reason_codes.push(
+                        n_reason_code
+                            .try_into()
+                            .map_err(|_| DecodeError::InvalidSubAckReasonCode(n_reason_code))?,
+                    );
+                }
+            }
         }
 
         Ok(Self {

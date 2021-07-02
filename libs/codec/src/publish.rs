@@ -7,7 +7,7 @@ use bytestring::ByteString;
 use crate::packet::PUBLISH;
 use crate::reader::PacketReader;
 use crate::writer::{bytes_remaining_length, PacketWriter};
-use crate::{property, DecodeError, EncodeError, Qos};
+use crate::{property, DecodeError, EncodeError, Level, Qos};
 
 #[derive(Debug, Default, Clone)]
 pub struct PublishProperties {
@@ -146,7 +146,7 @@ pub struct Publish {
 }
 
 impl Publish {
-    pub(crate) fn decode(mut data: Bytes, flags: u8) -> Result<Self, DecodeError> {
+    pub(crate) fn decode(mut data: Bytes, level: Level, flags: u8) -> Result<Self, DecodeError> {
         let dup = flags & 0b1000 > 0;
         let qos: Qos = {
             let n_qos = (flags & 0b110) >> 1;
@@ -165,12 +165,16 @@ impl Publish {
         } else {
             None
         };
-        let properties_len = data.read_remaining_length()?;
-        ensure!(
-            data.remaining() >= properties_len,
-            DecodeError::MalformedPacket
-        );
-        let properties = PublishProperties::decode(data.split_to(properties_len))?;
+
+        let mut properties = PublishProperties::default();
+        if level == Level::V5 {
+            let properties_len = data.read_remaining_length()?;
+            ensure!(
+                data.remaining() >= properties_len,
+                DecodeError::MalformedPacket
+            );
+            properties = PublishProperties::decode(data.split_to(properties_len))?;
+        }
 
         Ok(Self {
             dup,
@@ -184,20 +188,26 @@ impl Publish {
     }
 
     #[inline]
-    fn variable_header_length(&self) -> Result<usize, EncodeError> {
+    fn variable_header_length(&self, level: Level) -> Result<usize, EncodeError> {
+        let mut len = 2 + self.topic.len() + if self.qos != Qos::AtMostOnce { 2 } else { 0 };
         let properties_len = self.properties.bytes_length()?;
-        Ok(2 + self.topic.len()
-            + if self.qos != Qos::AtMostOnce { 2 } else { 0 }
-            + bytes_remaining_length(properties_len)?
-            + properties_len)
+        if level == Level::V5 {
+            len += bytes_remaining_length(properties_len)? + properties_len;
+        }
+        Ok(len)
     }
 
     #[inline]
-    fn payload_length(&self) -> Result<usize, EncodeError> {
+    fn payload_length(&self, _level: Level) -> Result<usize, EncodeError> {
         Ok(self.payload.len())
     }
 
-    pub(crate) fn encode(&self, data: &mut BytesMut) -> Result<(), EncodeError> {
+    pub(crate) fn encode(
+        &self,
+        data: &mut BytesMut,
+        level: Level,
+        max_size: usize,
+    ) -> Result<(), EncodeError> {
         ensure!(
             self.qos == Qos::AtMostOnce || self.packet_id.is_some(),
             EncodeError::RequirePacketId
@@ -217,14 +227,21 @@ impl Publish {
         };
 
         data.put_u8((PUBLISH << 4) | flag);
-        data.write_remaining_length(self.variable_header_length()? + self.payload_length()?)?;
+
+        let size = self.variable_header_length(level)? + self.payload_length(level)?;
+        ensure!(size < max_size, EncodeError::PacketTooLarge);
+        data.write_remaining_length(size)?;
+
         data.write_string(&self.topic)?;
 
         if let Some(packet_id) = self.packet_id {
             data.put_u16(packet_id.get());
         }
-        data.write_remaining_length(self.properties.bytes_length()?)?;
-        self.properties.encode(data)?;
+
+        if level == Level::V5 {
+            data.write_remaining_length(self.properties.bytes_length()?)?;
+            self.properties.encode(data)?;
+        }
 
         data.put_slice(&self.payload);
         Ok(())

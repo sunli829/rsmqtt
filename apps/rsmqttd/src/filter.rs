@@ -74,6 +74,11 @@ impl TopicFilter {
     }
 
     #[inline]
+    pub fn is_share(&self) -> bool {
+        self.share_name.is_some()
+    }
+
+    #[inline]
     pub fn share_name(&self) -> Option<&str> {
         self.share_name.as_deref()
     }

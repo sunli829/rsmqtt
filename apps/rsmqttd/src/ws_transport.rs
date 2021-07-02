@@ -86,11 +86,7 @@ pub fn handler(
                 let reader = tokio_util::io::StreamReader::new(
                     stream
                         .try_filter_map(|msg| async move {
-                            if msg.is_binary() {
-                                Ok(Some(Bytes::from(msg.into_bytes())))
-                            } else {
-                                Ok(None)
-                            }
+                            Ok(msg.is_binary().then(move || Bytes::from(msg.into_bytes())))
                         })
                         .map_err(|err| std::io::Error::new(ErrorKind::Other, err.to_string())),
                 );

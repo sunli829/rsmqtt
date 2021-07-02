@@ -5,11 +5,10 @@ use bytestring::ByteString;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
 use crate::packet::DISCONNECT;
-use crate::property;
 use crate::reader::PacketReader;
 use crate::writer::bytes_remaining_length;
 use crate::writer::PacketWriter;
-use crate::{DecodeError, EncodeError};
+use crate::{property, DecodeError, EncodeError, Level};
 
 #[derive(Debug, Clone, Copy, PartialEq, IntoPrimitive, TryFromPrimitive)]
 #[repr(u8)]
@@ -142,68 +141,96 @@ pub struct Disconnect {
 
 impl Disconnect {
     #[inline]
-    fn variable_header_length(&self) -> Result<usize, EncodeError> {
-        if !self.properties.is_empty() {
-            let properties_len = self.properties.bytes_length()?;
-            return Ok(1
-                + bytes_remaining_length(properties_len)?
-                + self.properties.bytes_length()?);
-        }
+    fn variable_header_length(&self, level: Level) -> Result<usize, EncodeError> {
+        match level {
+            Level::V4 => Ok(0),
+            Level::V5 => {
+                if !self.properties.is_empty() {
+                    let properties_len = self.properties.bytes_length()?;
+                    return Ok(1
+                        + bytes_remaining_length(properties_len)?
+                        + self.properties.bytes_length()?);
+                }
 
-        if self.reason_code == DisconnectReasonCode::NormalDisconnection {
-            return Ok(0);
-        }
+                if self.reason_code == DisconnectReasonCode::NormalDisconnection {
+                    return Ok(0);
+                }
 
-        Ok(1)
+                Ok(1)
+            }
+        }
     }
 
     #[inline]
-    fn payload_length(&self) -> Result<usize, EncodeError> {
+    fn payload_length(&self, _level: Level) -> Result<usize, EncodeError> {
         Ok(0)
     }
 
-    pub(crate) fn decode(mut data: Bytes) -> Result<Self, DecodeError> {
-        if !data.has_remaining() {
-            return Ok(Self {
-                reason_code: DisconnectReasonCode::NormalDisconnection,
-                properties: DisconnectProperties::default(),
-            });
+    pub(crate) fn decode(mut data: Bytes, level: Level) -> Result<Self, DecodeError> {
+        match level {
+            Level::V4 => {
+                if !data.is_empty() {
+                    return Err(DecodeError::MalformedPacket);
+                }
+                Ok(Self {
+                    reason_code: DisconnectReasonCode::NormalDisconnection,
+                    properties: DisconnectProperties::default(),
+                })
+            }
+            Level::V5 => {
+                if !data.has_remaining() {
+                    return Ok(Self {
+                        reason_code: DisconnectReasonCode::NormalDisconnection,
+                        properties: DisconnectProperties::default(),
+                    });
+                }
+
+                let reason_code = {
+                    let code = data.read_u8()?;
+                    code.try_into()
+                        .map_err(|_| DecodeError::InvalidDisconnectReasonCode(code))?
+                };
+
+                let properties = if data.has_remaining() {
+                    let properties_len = data.read_remaining_length()?;
+                    ensure!(
+                        data.remaining() >= properties_len,
+                        DecodeError::MalformedPacket
+                    );
+                    DisconnectProperties::decode(data.split_to(properties_len))?
+                } else {
+                    DisconnectProperties::default()
+                };
+
+                Ok(Self {
+                    reason_code,
+                    properties,
+                })
+            }
         }
-
-        let reason_code = {
-            let code = data.read_u8()?;
-            code.try_into()
-                .map_err(|_| DecodeError::InvalidDisconnectReasonCode(code))?
-        };
-
-        let properties = if data.has_remaining() {
-            let properties_len = data.read_remaining_length()?;
-            ensure!(
-                data.remaining() >= properties_len,
-                DecodeError::MalformedPacket
-            );
-            DisconnectProperties::decode(data.split_to(properties_len))?
-        } else {
-            DisconnectProperties::default()
-        };
-
-        Ok(Self {
-            reason_code,
-            properties,
-        })
     }
 
-    pub(crate) fn encode(&self, data: &mut BytesMut) -> Result<(), EncodeError> {
+    pub(crate) fn encode(
+        &self,
+        data: &mut BytesMut,
+        level: Level,
+        max_size: usize,
+    ) -> Result<(), EncodeError> {
         data.put_u8(DISCONNECT << 4);
-        data.write_remaining_length(self.variable_header_length()? + self.payload_length()?)?;
 
-        if self.reason_code != DisconnectReasonCode::NormalDisconnection {
-            data.put_u8(self.reason_code.into());
-        }
+        let size = self.variable_header_length(level)? + self.payload_length(level)?;
+        ensure!(size < max_size, EncodeError::PacketTooLarge);
+        data.write_remaining_length(size)?;
 
-        if !self.properties.is_empty() {
-            data.write_remaining_length(self.properties.bytes_length()?)?;
-            self.properties.encode(data)?;
+        if level == Level::V5 {
+            if self.reason_code != DisconnectReasonCode::NormalDisconnection {
+                data.put_u8(self.reason_code.into());
+            }
+
+            if !self.properties.is_empty() {
+                data.write_remaining_length(self.properties.bytes_length()?)?;
+                self.properties.encode(data)?;
+            }
         }
 
         Ok(())

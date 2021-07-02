@@ -4,16 +4,16 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use bytes::BytesMut;
 use bytestring::ByteString;
-use fnv::FnvHashMap;
-use mqttv5::{
-    ConnAck, ConnAckProperties, Connect, ConnectReasonCode, Disconnect, DisconnectProperties,
-    DisconnectReasonCode, EncodeError, LastWill, Packet, PacketEncoder, PubAck, PubAckReasonCode,
-    PubComp, PubCompProperties, PubCompReasonCode, PubRec, PubRecReasonCode, PubRel,
-    PubRelReasonCode, Publish, Qos, SubAck, SubAckProperties, Subscribe, SubscribeReasonCode,
-    UnsubAck, UnsubAckReasonCode, Unsubscribe,
+use codec::{
+    Codec, ConnAck, ConnAckProperties, Connect, ConnectReasonCode, Disconnect,
+    DisconnectProperties, DisconnectReasonCode, EncodeError, LastWill, Packet, PubAck,
+    PubAckProperties, PubAckReasonCode, PubComp, PubCompProperties, PubCompReasonCode, PubRec,
+    PubRecProperties, PubRecReasonCode, PubRel, PubRelProperties, PubRelReasonCode, Publish, Qos,
+    SubAck, SubAckProperties, Subscribe, SubscribeReasonCode, UnsubAck, UnsubAckProperties,
+    UnsubAckReasonCode, Unsubscribe,
 };
+use fnv::FnvHashMap;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, oneshot, Notify};
 
@@ -23,20 +23,19 @@ use crate::filter::{self, TopicFilter};
 use crate::message::Message;
 use crate::server::{Control, ServerState};
 
-pub struct Connection<W> {
+pub struct Connection<R, W> {
     state: Arc<ServerState>,
     remote_addr: String,
     client_id: Option<ByteString>,
     control_sender: Option<mpsc::UnboundedSender<Control>>,
     notify: Arc<Notify>,
-    encoder: PacketEncoder<W>,
+    codec: Codec<R, W>,
     session_expiry_interval: u32,
     receive_in_max: usize,
     receive_out_max: usize,
     receive_in_quota: usize,
     receive_out_quota: usize,
     topic_alias_max: usize,
-    max_packet_size_in: Option<u32>,
     topic_alias: FnvHashMap<NonZeroU16, ByteString>,
     keep_alive: u16,
     last_active: Instant,
@@ -45,7 +44,11 @@ pub struct Connection<W> {
     next_packet_id: u16,
 }
 
-impl<W: AsyncWrite + Unpin> Connection<W> {
+impl<R, W> Connection<R, W>
+where
+    R: AsyncRead + Send + Unpin,
+    W: AsyncWrite + Send + Unpin,
+{
     fn take_packet_id(&mut self) -> NonZeroU16 {
         let id = self.next_packet_id;
         if self.next_packet_id == u16::MAX {
@@ -62,7 +65,7 @@ impl<W: AsyncWrite + Unpin> Connection<W> {
             packet = ?packet,
             "send packet",
         );
-        match self.encoder.encode(packet).await {
+        match self.codec.encode(packet).await {
             Ok(packet_size) => {
                 self.state.metrics.inc_msgs_sent(1);
                 self.state.metrics.inc_bytes_sent(packet_size);
@@ -150,9 +153,9 @@ impl<W: AsyncWrite + Unpin> Connection<W> {
             conn_ack_properties.maximum_qos = self.state.config.server.maximum_qos;
         }
 
-        let max_packet_size_out = connect.properties.max_packet_size;
-        let max_packet_size_in = self.state.config.server.max_packet_size;
-        if let Some(max_packet_size_in) = max_packet_size_in {
+        let max_packet_size_out = connect.properties.max_packet_size.unwrap_or(u32::MAX);
+        let max_packet_size_in = self.state.config.server.max_packet_size.unwrap_or(u32::MAX);
+        if max_packet_size_in != u32::MAX {
             conn_ack_properties.max_packet_size = Some(max_packet_size_in);
         }
 
@@ -193,6 +196,19 @@ impl<W: AsyncWrite + Unpin> Connection<W> {
 
         // create session
         if connect.client_id.is_empty() {
+            // If the Server rejects the ClientID it MAY respond to the CONNECT packet with a CONNACK
+            // using Reason Code 0x85 (Client Identifier not valid) as described in section 4.13 Handling
+            // errors, and then it MUST close the Network Connection [MQTT-3.1.3-8].
+            if !connect.clean_start {
+                self.send_packet(&Packet::ConnAck(ConnAck {
+                    session_present: false,
+                    reason_code: ConnectReasonCode::ClientIdentifierNotValid,
+                    properties: conn_ack_properties,
+                }))
+                .await?;
+                return Err(Error::ServerDisconnectWithoutReason);
+            }
+
             connect.client_id = format!("auto-{}", uuid::Uuid::new_v4()).into();
             conn_ack_properties.assigned_client_identifier = Some(connect.client_id.clone());
         }
@@ -245,14 +261,13 @@ impl<W: AsyncWrite + Unpin> Connection<W> {
         self.receive_out_max = receive_out_max;
         self.receive_in_quota = receive_in_max;
         self.receive_out_quota = receive_out_max;
-        self.max_packet_size_in = max_packet_size_in;
         self.topic_alias_max = topic_alias_max as usize;
         self.session_expiry_interval = session_expiry_interval;
         self.last_will_expiry_interval = last_will_expiry_interval;
         self.last_will = connect.last_will.clone();
 
-        self.encoder
-            .set_max_size(max_packet_size_out.unwrap_or(u32::MAX));
+        self.codec.set_output_max_size(max_packet_size_out as usize);
+        self.codec.set_input_max_size(max_packet_size_in as usize);
 
         loop {
             let mut connections = self.state.connections.write().await;
@@ -336,16 +351,16 @@ impl<W: AsyncWrite + Unpin> Connection<W> {
             return Err(MqttError::new(DisconnectReasonCode::ProtocolError).into());
         }
 
-        if publish.topic.starts_with('$') {
-            return Err(MqttError::new(DisconnectReasonCode::ProtocolError).into());
-        }
-
         if publish.qos > Qos::AtMostOnce && publish.packet_id.is_none() {
             return Err(MqttError::new(DisconnectReasonCode::ProtocolError).into());
         }
 
         if !publish.properties.subscription_identifiers.is_empty() {
             return Err(MqttError::new(DisconnectReasonCode::ProtocolError).into());
+        }
+
+        if publish.topic.starts_with('$') {
+            return Err(MqttError::new(DisconnectReasonCode::TopicNameInvalid).into());
         }
 
         if !filter::valid_topic(&publish.topic) {
@@ -421,7 +436,7 @@ impl<W: AsyncWrite + Unpin> Connection<W> {
                 self.send_packet(&Packet::PubAck(PubAck {
                     packet_id: packet_id.unwrap(),
                     reason_code: PubAckReasonCode::Success,
-                    properties: Default::default(),
+                    properties: PubAckProperties::default(),
                 }))
                 .await?;
             }
@@ -431,7 +446,7 @@ impl<W: AsyncWrite + Unpin> Connection<W> {
                     self.send_packet(&Packet::PubRec(PubRec {
                         packet_id: packet_id.unwrap(),
                         reason_code: PubRecReasonCode::QuotaExceeded,
-                        properties: Default::default(),
+                        properties: PubRecProperties::default(),
                     }))
                     .await?;
                 }
@@ -446,7 +461,7 @@ impl<W: AsyncWrite + Unpin> Connection<W> {
                         self.send_packet(&Packet::PubRec(PubRec {
                             packet_id: packet_id.unwrap(),
                             reason_code: PubRecReasonCode::Success,
-                            properties: Default::default(),
+                            properties: PubRecProperties::default(),
                         }))
                         .await?;
                     }
@@ -515,7 +530,7 @@ impl<W: AsyncWrite + Unpin> Connection<W> {
                 self.send_packet(&Packet::PubRel(PubRel {
                     packet_id: pub_rec.packet_id,
                     reason_code: PubRelReasonCode::Success,
-                    properties: Default::default(),
+                    properties: PubRelProperties::default(),
                 }))
                 .await?;
                 Ok(())
@@ -646,6 +661,11 @@ impl<W: AsyncWrite + Unpin> Connection<W> {
                 }
             };
 
+            if topic_filter.is_share() && filter.no_local {
+                // It is a Protocol Error to set the No Local bit to 1 on a Shared Subscription [MQTT-3.8.3-4].
+                return Err(MqttError::new(DisconnectReasonCode::ProtocolError).into());
+            }
+
             if !self
                 .state
                 .config
@@ -732,7 +752,7 @@ impl<W: AsyncWrite + Unpin> Connection<W> {
         self.send_packet(&Packet::UnsubAck(UnsubAck {
             packet_id: unsubscribe.packet_id,
             reason_codes,
-            properties: Default::default(),
+            properties: UnsubAckProperties::default(),
         }))
         .await?;
         Ok(())
@@ -883,8 +903,8 @@ impl<W: AsyncWrite + Unpin> Connection<W> {
 }
 
 pub async fn run(
-    mut reader: impl AsyncRead + Unpin,
-    writer: impl AsyncWrite + Unpin,
+    reader: impl AsyncRead + Send + Unpin,
+    writer: impl AsyncWrite + Send + Unpin,
     remote_addr: String,
     state: Arc<ServerState>,
 ) {
@@ -897,14 +917,13 @@ pub async fn run(
         client_id: None,
         control_sender: Some(control_sender),
         notify: Arc::new(Notify::new()),
-        encoder: PacketEncoder::new(writer),
+        codec: Codec::new(reader, writer),
         session_expiry_interval: 0,
         receive_in_max: 0,
         receive_out_max: 0,
         receive_in_quota: 0,
         receive_out_quota: 0,
         topic_alias_max: 0,
-        max_packet_size_in: Some(defaults::MAX_PACKET_SIZE),
         topic_alias: FnvHashMap::default(),
         keep_alive: defaults::KEEP_ALIVE,
         last_active: Instant::now(),
@@ -913,7 +932,6 @@ pub async fn run(
         next_packet_id: 1,
     };
     let mut keep_alive_interval = tokio::time::interval(Duration::from_secs(10));
-    let mut data = BytesMut::new();
 
     loop {
         tokio::select! {
@@ -927,7 +945,7 @@ pub async fn run(
                     break;
                 }
             }
-            res = Packet::decode(&mut reader, &mut data, connection.max_packet_size_in) => {
+            res = connection.codec.decode() => {
                 match res {
                     Ok(Some((packet, packet_size))) => {
                         connection.state.metrics.inc_bytes_received(packet_size);
@@ -940,11 +958,11 @@ pub async fn run(
                         );
                         match connection.handle_packet(packet).await {
                             Ok(_) => {}
-                            Err(Error::Mqtt(err)) => {
+                            Err(Error::ServerDisconnect(err)) => {
                                 tracing::debug!(
                                     remote_addr = %connection.remote_addr,
                                     error = %err,
-                                    "mqtt error",
+                                    "server disconnect",
                                 );
                                 connection.send_disconnect(
                                     err.reason_code,
@@ -952,7 +970,7 @@ pub async fn run(
                                 ).await.ok();
                                 break;
                             }
-                            Err(Error::ClientDisconnect(_)) => break,
+                            Err(Error::ServerDisconnectWithoutReason | Error::ClientDisconnect(_)) => break,
                             Err(err) => {
                                 tracing::debug!(
                                     remote_addr = %connection.remote_addr,

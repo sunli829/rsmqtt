@@ -1,5 +1,19 @@
+use bytestring::ByteString;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, IntoPrimitive, TryFromPrimitive)]
+#[repr(u8)]
+pub enum Level {
+    V4 = 4,
+    V5 = 5,
+}
+
+#[derive(Debug)]
+pub struct Login {
+    pub username: ByteString,
+    pub password: ByteString,
+}
 
 /// Level of assurance for delivery of an Application Message.
 #[derive(

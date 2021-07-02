@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use bytestring::ByteString;
-use mqttv5::LastWill;
+use codec::LastWill;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot, watch, Mutex, RwLock};
 use tokio::task::JoinHandle;

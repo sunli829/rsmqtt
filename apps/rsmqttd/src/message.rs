@@ -2,7 +2,7 @@ use std::time::{Duration, SystemTime};
 
 use bytes::Bytes;
 use bytestring::ByteString;
-use mqttv5::{LastWill, Publish, PublishProperties, Qos};
+use codec::{LastWill, Publish, PublishProperties, Qos};
 
 #[derive(Debug, Clone)]
 pub struct Message {

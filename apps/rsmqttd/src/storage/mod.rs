@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use bytestring::ByteString;
-use mqttv5::{LastWill, Publish, SubscribeFilter};
+use codec::{LastWill, Publish, SubscribeFilter};
 use tokio::sync::Notify;
 
 use crate::filter::TopicFilter;

@@ -8,7 +8,7 @@ use num_enum::{IntoPrimitive, TryFromPrimitive};
 use crate::packet::SUBSCRIBE;
 use crate::reader::PacketReader;
 use crate::writer::{bytes_remaining_length, PacketWriter};
-use crate::{property, DecodeError, EncodeError, Qos};
+use crate::{property, DecodeError, EncodeError, Level, Qos};
 
 #[derive(Debug, Default)]
 pub struct SubscribeProperties {
@@ -91,44 +91,73 @@ pub struct SubscribeFilter {
 }
 
 impl SubscribeFilter {
-    fn decode(data: &mut Bytes) -> Result<Self, DecodeError> {
+    fn decode(data: &mut Bytes, level: Level) -> Result<Self, DecodeError> {
         let path = data.read_string()?;
-        let options = data.read_u8()?;
-        let qos: Qos = {
-            let n_qos = options & 0b11;
-            n_qos
-                .try_into()
-                .map_err(|_| DecodeError::InvalidQOS(n_qos))?
-        };
-        let no_local = options & 0b100 > 0;
-        let retain_as_published = options & 0b1000 > 0;
-        let retain_handling = {
-            let n_retain_handling = (options & 0b110000) >> 4;
-            n_retain_handling
-                .try_into()
-                .map_err(|_| DecodeError::InvalidRetainHandling(n_retain_handling))?
-        };
-        Ok(Self {
-            path,
-            qos,
-            no_local,
-            retain_as_published,
-            retain_handling,
-        })
+
+        match level {
+            Level::V4 => {
+                let options = data.read_u8()?;
+                if options & 0b11111100 > 0 {
+                    return Err(DecodeError::MalformedPacket);
+                }
+                let qos: Qos = {
+                    let n_qos = options & 0b11;
+                    n_qos
+                        .try_into()
+                        .map_err(|_| DecodeError::InvalidQOS(n_qos))?
+                };
+                Ok(Self {
+                    path,
+                    qos,
+                    no_local: false,
+                    retain_as_published: false,
+                    retain_handling: RetainHandling::OnEverySubscribe,
+                })
+            }
+            Level::V5 => {
+                let options = data.read_u8()?;
+                let qos: Qos = {
+                    let n_qos = options & 0b11;
+                    n_qos
+                        .try_into()
+                        .map_err(|_| DecodeError::InvalidQOS(n_qos))?
+                };
+                let no_local = options & 0b100 > 0;
+                let retain_as_published = options & 0b1000 > 0;
+                let retain_handling = {
+                    let n_retain_handling = (options & 0b110000) >> 4;
+                    n_retain_handling
+                        .try_into()
+                        .map_err(|_| DecodeError::InvalidRetainHandling(n_retain_handling))?
+                };
+
+                Ok(Self {
+                    path,
+                    qos,
+                    no_local,
+                    retain_as_published,
+                    retain_handling,
+                })
+            }
+        }
     }
 
-    fn encode(&self, data: &mut BytesMut) -> Result<(), EncodeError> {
+    fn encode(&self, data: &mut BytesMut, level: Level) -> Result<(), EncodeError> {
         data.write_string(&self.path)?;
 
         let mut flag = 0;
         flag |= Into::<u8>::into(self.qos);
-        if self.no_local {
-            flag |= 0b100;
+
+        if level == Level::V5 {
+            if self.no_local {
+                flag |= 0b100;
+            }
+            if self.retain_as_published {
+                flag |= 0b1000;
+            }
+            flag |= Into::<u8>::into(self.retain_handling) << 4;
         }
-        if self.retain_as_published {
-            flag |= 0b1000;
-        }
-        flag |= Into::<u8>::into(self.retain_handling) << 4;
+
         data.put_u8(flag);
         Ok(())
     }
@@ -143,13 +172,19 @@ pub struct Subscribe {
 
 impl Subscribe {
     #[inline]
-    fn variable_header_length(&self) -> Result<usize, EncodeError> {
-        let properties_len = self.properties.bytes_length()?;
-        Ok(2 + bytes_remaining_length(properties_len)? + properties_len)
+    fn variable_header_length(&self, level: Level) -> Result<usize, EncodeError> {
+        let mut len = 2;
+
+        if level == Level::V5 {
+            let properties_len = self.properties.bytes_length()?;
+            len += bytes_remaining_length(properties_len)? + properties_len;
+        }
+
+        Ok(len)
     }
 
     #[inline]
-    fn payload_length(&self) -> Result<usize, EncodeError> {
+    fn payload_length(&self, _level: Level) -> Result<usize, EncodeError> {
         let mut len = 0;
         for filter in &self.filters {
             len += 2 + filter.path.len() + 1;
@@ -157,21 +192,32 @@ impl Subscribe {
         Ok(len)
     }
 
-    pub(crate) fn encode(&self, data: &mut BytesMut) -> Result<(), EncodeError> {
+    pub(crate) fn encode(
+        &self,
+        data: &mut BytesMut,
+        level: Level,
+        max_size: usize,
+    ) -> Result<(), EncodeError> {
         data.put_u8((SUBSCRIBE << 4) | 0b0010);
-        data.write_remaining_length(self.variable_header_length()? + self.payload_length()?)?;
+
+        let size = self.variable_header_length(level)? + self.payload_length(level)?;
+        ensure!(size < max_size, EncodeError::PacketTooLarge);
+        data.write_remaining_length(size)?;
 
         data.put_u16(self.packet_id.get());
-        data.write_remaining_length(self.properties.bytes_length()?)?;
-        self.properties.encode(data)?;
+
+        if level == Level::V5 {
+            data.write_remaining_length(self.properties.bytes_length()?)?;
+            self.properties.encode(data)?;
+        }
 
         for filter in &self.filters {
-            filter.encode(data)?;
+            filter.encode(data, level)?;
         }
         Ok(())
     }
 
-    pub(crate) fn decode(mut data: Bytes, flags: u8) -> Result<Self, DecodeError> {
+    pub(crate) fn decode(mut data: Bytes, level: Level, flags: u8) -> Result<Self, DecodeError> {
         // Bits 3,2,1 and 0 of the Fixed Header of the SUBSCRIBE packet are reserved and MUST be
         // set to 0,0,1 and 0 respectively. The Server MUST treat any other value as malformed
         // and close the Network Connection [MQTT-3.8.1-1].
@@ -182,17 +228,20 @@ impl Subscribe {
             .try_into()
             .map_err(|_| DecodeError::InvalidPacketId)?;
 
-        let properties_len = data.read_remaining_length()?;
-        ensure!(
-            data.remaining() >= properties_len,
-            DecodeError::MalformedPacket
-        );
-        let properties = SubscribeProperties::decode(data.split_to(properties_len))?;
+        let mut properties = SubscribeProperties::default();
+        if level == Level::V5 {
+            let properties_len = data.read_remaining_length()?;
+            ensure!(
+                data.remaining() >= properties_len,
+                DecodeError::MalformedPacket
+            );
+            properties = SubscribeProperties::decode(data.split_to(properties_len))?;
+        }
 
         // parse payload
         let mut filters = Vec::new();
         while data.has_remaining() {
-            filters.push(SubscribeFilter::decode(&mut data)?);
+            filters.push(SubscribeFilter::decode(&mut data, level)?);
         }
 
         Ok(Self {
