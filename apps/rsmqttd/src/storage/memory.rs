@@ -6,13 +6,13 @@ use std::sync::Arc;
 use anyhow::Result;
 use bytestring::ByteString;
 use fnv::FnvHashMap;
-use mqttv5::{LastWill, Qos, RetainHandling, SubscribeFilter};
+use mqttv5::{LastWill, Publish, Qos, RetainHandling, SubscribeFilter};
 use parking_lot::{RwLock, RwLockUpgradableReadGuard};
 use tokio::sync::Notify;
 
 use crate::filter::TopicFilter;
 use crate::message::Message;
-use crate::storage::{Storage, StorageMetrics};
+use crate::storage::{SessionInfo, Storage, StorageMetrics};
 
 macro_rules! session_not_found {
     ($client_id:expr) => {
@@ -42,7 +42,7 @@ struct Session {
     last_will: Option<LastWill>,
     session_expiry_interval: u32,
     last_will_expiry_interval: u32,
-    inflight_messages: VecDeque<(NonZeroU16, Message)>,
+    inflight_pub_packets: VecDeque<Publish>,
     uncompleted_messages: FnvHashMap<NonZeroU16, Message>,
 }
 
@@ -133,7 +133,7 @@ impl Storage for StorageMemory {
                 last_will,
                 session_expiry_interval,
                 last_will_expiry_interval,
-                inflight_messages: VecDeque::default(),
+                inflight_pub_packets: VecDeque::default(),
                 uncompleted_messages: FnvHashMap::default(),
             });
             inner.sessions.insert(client_id.clone(), session);
@@ -159,6 +159,23 @@ impl Storage for StorageMemory {
             clients.remove(client_id);
         }
         Ok(found)
+    }
+
+    async fn get_sessions(&self) -> Result<Vec<SessionInfo>> {
+        let inner = self.inner.read();
+        Ok(inner
+            .sessions
+            .iter()
+            .map(|(client_id, session)| {
+                let session = session.read();
+                SessionInfo {
+                    client_id: client_id.clone(),
+                    last_will: session.last_will.clone(),
+                    session_expiry_interval: session.session_expiry_interval,
+                    last_will_expiry_interval: session.last_will_expiry_interval,
+                }
+            })
+            .collect())
     }
 
     async fn subscribe(
@@ -332,56 +349,53 @@ impl Storage for StorageMemory {
         Ok(())
     }
 
-    async fn add_inflight_message(
-        &self,
-        client_id: &str,
-        packet_id: NonZeroU16,
-        msg: Message,
-    ) -> Result<()> {
+    async fn add_inflight_pub_packet(&self, client_id: &str, publish: Publish) -> Result<()> {
         let inner = self.inner.read();
         if let Some(session) = inner.sessions.get(client_id) {
             let mut session = session.write();
-            session.inflight_messages.push_back((packet_id, msg));
+            session.inflight_pub_packets.push_back(publish);
             return Ok(());
         }
         session_not_found!(client_id)
     }
 
-    async fn get_inflight_message(
+    async fn get_inflight_pub_packets(
         &self,
         client_id: &str,
         packet_id: NonZeroU16,
         remove: bool,
-    ) -> Result<Option<Message>> {
+    ) -> Result<Option<Publish>> {
         let inner = self.inner.read();
         if let Some(session) = inner.sessions.get(client_id) {
             return if remove {
                 let mut session = session.write();
-                if session.inflight_messages.front().map(|(id, _)| *id) == Some(packet_id) {
-                    Ok(session.inflight_messages.pop_front().map(|(_, msg)| msg))
+                if session
+                    .inflight_pub_packets
+                    .front()
+                    .map(|publish| publish.packet_id == Some(packet_id))
+                    .unwrap_or_default()
+                {
+                    Ok(session.inflight_pub_packets.pop_front())
                 } else {
                     Ok(None)
                 }
             } else {
                 let session = session.read();
                 Ok(session
-                    .inflight_messages
+                    .inflight_pub_packets
                     .iter()
-                    .find(|(id, _)| *id == packet_id)
-                    .map(|(_, msg)| msg.clone()))
+                    .find(|publish| publish.packet_id == Some(packet_id))
+                    .cloned())
             };
         }
         session_not_found!(client_id)
     }
 
-    async fn get_all_inflight_messages(
-        &self,
-        client_id: &str,
-    ) -> Result<Vec<(NonZeroU16, Message)>> {
+    async fn get_all_inflight_pub_packets(&self, client_id: &str) -> Result<Vec<Publish>> {
         let inner = self.inner.read();
         if let Some(session) = inner.sessions.get(client_id) {
             let session = session.read();
-            return Ok(session.inflight_messages.iter().cloned().collect());
+            return Ok(session.inflight_pub_packets.iter().cloned().collect());
         }
         session_not_found!(client_id)
     }
@@ -427,7 +441,7 @@ impl Storage for StorageMemory {
             inflight_messages_count: inner
                 .sessions
                 .values()
-                .map(|session| session.read().inflight_messages.len())
+                .map(|session| session.read().inflight_pub_packets.len())
                 .sum::<usize>(),
             retained_messages_count: inner.retain_messages.len(),
             messages_count: inner.retain_messages.len()

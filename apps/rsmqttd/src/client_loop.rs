@@ -285,25 +285,23 @@ impl<W: AsyncWrite + Unpin> Connection<W> {
         .await?;
         self.state.metrics.inc_connection_count(1);
 
-        // retry send inflight messages
+        // retry send inflight packets
         match self
             .state
             .storage
-            .get_all_inflight_messages(&connect.client_id)
+            .get_all_inflight_pub_packets(&connect.client_id)
             .await
         {
-            Ok(msgs) => {
-                for (packet_id, msg) in msgs {
-                    let mut publish = msg.to_publish();
+            Ok(packets) => {
+                for mut publish in packets {
                     publish.dup = true;
-                    publish.packet_id = Some(packet_id);
                     self.send_packet(&Packet::Publish(publish)).await?;
                 }
             }
             Err(err) => {
                 tracing::error!(
                     error = %err,
-                    "failed to take all inflight messages"
+                    "failed to take all inflight packets"
                 );
                 return Err(MqttError::new(DisconnectReasonCode::UnspecifiedError).into());
             }
@@ -476,13 +474,13 @@ impl<W: AsyncWrite + Unpin> Connection<W> {
             remote_addr = %self.remote_addr,
             client_id = %client_id,
             packet_id = pub_ack.packet_id,
-            "remove inflight message",
+            "remove inflight packet",
         );
 
         match self
             .state
             .storage
-            .get_inflight_message(client_id, pub_ack.packet_id, true)
+            .get_inflight_pub_packets(client_id, pub_ack.packet_id, true)
             .await
         {
             Ok(Some(_)) => {
@@ -491,7 +489,7 @@ impl<W: AsyncWrite + Unpin> Connection<W> {
             }
             Ok(None) => Err(MqttError::new(DisconnectReasonCode::ProtocolError).into()),
             Err(err) => {
-                tracing::error!(error = %err, "failed to get inflight message");
+                tracing::error!(error = %err, "failed to get inflight packet");
                 Err(MqttError::new(DisconnectReasonCode::UnspecifiedError).into())
             }
         }
@@ -510,7 +508,7 @@ impl<W: AsyncWrite + Unpin> Connection<W> {
         match self
             .state
             .storage
-            .get_inflight_message(client_id, pub_rec.packet_id, false)
+            .get_inflight_pub_packets(client_id, pub_rec.packet_id, false)
             .await
         {
             Ok(Some(_)) => {
@@ -524,7 +522,7 @@ impl<W: AsyncWrite + Unpin> Connection<W> {
             }
             Ok(None) => Err(MqttError::new(DisconnectReasonCode::ProtocolError).into()),
             Err(err) => {
-                tracing::error!(error = %err, "failed to get inflight message");
+                tracing::error!(error = %err, "failed to get inflight packet");
                 Err(MqttError::new(DisconnectReasonCode::UnspecifiedError).into())
             }
         }
@@ -575,7 +573,7 @@ impl<W: AsyncWrite + Unpin> Connection<W> {
             Err(err) => {
                 tracing::error!(
                     error = %err,
-                    "failed to get uncompleted messages",
+                    "failed to get uncompleted message",
                 );
                 return Err(MqttError::new(DisconnectReasonCode::UnspecifiedError).into());
             }
@@ -598,13 +596,13 @@ impl<W: AsyncWrite + Unpin> Connection<W> {
             remote_addr = %self.remote_addr,
             client_id = %client_id,
             packet_id = pub_comp.packet_id,
-            "remove inflight message",
+            "remove inflight packet",
         );
 
         match self
             .state
             .storage
-            .get_inflight_message(client_id, pub_comp.packet_id, true)
+            .get_inflight_pub_packets(client_id, pub_comp.packet_id, true)
             .await
         {
             Ok(Some(_)) => {
@@ -616,13 +614,13 @@ impl<W: AsyncWrite + Unpin> Connection<W> {
                     remote_addr = %self.remote_addr,
                     client_id = %client_id,
                     packet_id = pub_comp.packet_id,
-                    "inflight message not found",
+                    "inflight packet not found",
                 );
             }
             Err(err) => {
                 tracing::error!(
                     error = %err,
-                    "failed to get inflight message",
+                    "failed to get inflight packet",
                 );
                 return Err(MqttError::new(DisconnectReasonCode::UnspecifiedError).into());
             }
@@ -863,17 +861,17 @@ impl<W: AsyncWrite + Unpin> Connection<W> {
                     remote_addr = %self.remote_addr,
                     client_id = %client_id,
                     packet_id = packet_id,
-                    "add inflight message",
+                    "add inflight packet",
                 );
                 if let Err(err) = self
                     .state
                     .storage
-                    .add_inflight_message(&client_id, packet_id, msg.clone())
+                    .add_inflight_pub_packet(&client_id, publish.clone())
                     .await
                 {
                     tracing::error!(
                         error = %err,
-                        "failed to add inflight message",
+                        "failed to add inflight packet",
                     );
                     return Err(MqttError::new(DisconnectReasonCode::ProtocolError).into());
                 }
@@ -1018,70 +1016,16 @@ pub async fn run(
             .write()
             .await
             .remove(&client_id);
-
-        // session timeout
-        let state = connection.state.clone();
-        let last_will = connection.last_will;
-        let session_expiry_interval = connection.session_expiry_interval;
-        let last_will_expiry_interval = connection.last_will_expiry_interval;
-
-        let session_timeout_handle = tokio::spawn({
-            let client_id = client_id.clone();
-            async move {
-                let last_will_expiry_interval =
-                    last_will_expiry_interval.min(session_expiry_interval);
-                let session_expiry_interval =
-                    if last_will_expiry_interval <= session_expiry_interval {
-                        session_expiry_interval - last_will_expiry_interval
-                    } else {
-                        0
-                    };
-
-                tokio::time::sleep(Duration::from_secs(last_will_expiry_interval as u64)).await;
-                if let Some(last_will) = last_will {
-                    tracing::debug!(
-                        publisher = %client_id,
-                        topic = %last_will.topic,
-                        "send last will message",
-                    );
-
-                    if let Err(err) = state
-                        .storage
-                        .publish(vec![Message::from_last_will(last_will)])
-                        .await
-                    {
-                        tracing::error!(
-                            error = %err,
-                            "failed to publish last will message",
-                        )
-                    }
-                }
-
-                tokio::time::sleep(Duration::from_secs(session_expiry_interval as u64)).await;
-
-                tracing::debug!(
-                    client_id = %client_id,
-                    "session timeout",
-                );
-
-                if let Err(err) = state.storage.remove_session(&client_id).await {
-                    tracing::error!(
-                        error = %err,
-                        "failed to remove session",
-                    )
-                }
-                state.session_timeouts.lock().await.remove(&client_id);
-                state.metrics.inc_clients_expired(1);
-            }
-        });
-        connection
-            .state
-            .session_timeouts
-            .lock()
-            .await
-            .insert(client_id, session_timeout_handle);
-
         connection.state.metrics.dec_connection_count(1);
+
+        crate::server::add_session_timeout_handle(
+            state.clone(),
+            client_id,
+            connection.last_will,
+            connection.session_expiry_interval,
+            connection.last_will_expiry_interval,
+        )
+        .await;
     }
 
     state.metrics.dec_socket_connections(1);

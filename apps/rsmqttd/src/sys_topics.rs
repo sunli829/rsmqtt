@@ -131,196 +131,203 @@ pub async fn update_loop(state: Arc<ServerState>, interval: Duration) {
 
         let uptime = (Instant::now() - start_time).as_secs();
 
-        last_state.update("$SYS/broker/uptime", format!("{} seconds", uptime));
+        last_state.update("broker/uptime", format!("{} seconds", uptime));
 
-        last_state.update("$SYS/broker/bytes/received", metrics.bytes_received);
-        last_state.update("$SYS/broker/bytes/sent", metrics.bytes_sent);
+        last_state.update("broker/bytes/received", metrics.bytes_received);
+        last_state.update("broker/bytes/sent", metrics.bytes_sent);
 
-        last_state.update("$SYS/broker/clients/connected", metrics.connection_count);
-        last_state.update("$SYS/broker/clients/expired", metrics.clients_expired);
+        last_state.update("broker/clients/connected", metrics.connection_count);
+        last_state.update("broker/clients/expired", metrics.clients_expired);
         last_state.update(
-            "$SYS/broker/clients/disconnected",
+            "broker/clients/disconnected",
             storage_metrics.session_count - metrics.connection_count,
         );
-        last_state.update("$SYS/broker/clients/maximum", max_clients);
-        last_state.update("$SYS/broker/clients/total", storage_metrics.session_count);
+        last_state.update("broker/clients/maximum", max_clients);
+        last_state.update("broker/clients/total", storage_metrics.session_count);
 
         last_state.update(
-            "$SYS/broker/messages/inflight",
+            "broker/messages/inflight",
             storage_metrics.inflight_messages_count,
         );
-        last_state.update("$SYS/broker/messages/received", metrics.msgs_received);
-        last_state.update("$SYS/broker/messages/sent", metrics.msgs_sent);
-        last_state.update("$SYS/broker/publish/messages/dropped", metrics.msgs_dropped);
+        last_state.update("broker/messages/received", metrics.msgs_received);
+        last_state.update("broker/messages/sent", metrics.msgs_sent);
+        last_state.update("broker/publish/messages/dropped", metrics.msgs_dropped);
         last_state.update(
-            "$SYS/broker/publish/messages/received",
+            "broker/publish/messages/received",
             metrics.pub_msgs_received,
         );
-        last_state.update("$SYS/broker/publish/messages/sent", metrics.pub_msgs_sent);
+        last_state.update("broker/publish/messages/sent", metrics.pub_msgs_sent);
 
         last_state.update(
-            "$SYS/broker/retained messages/count",
+            "broker/retained messages/count",
             storage_metrics.retained_messages_count,
         );
         last_state.update(
-            "$SYS/broker/store/messages/count",
+            "broker/store/messages/count",
             storage_metrics.messages_count,
         );
         last_state.update(
-            "$SYS/broker/store/messages/bytes",
+            "broker/store/messages/bytes",
             storage_metrics.messages_bytes,
         );
 
         last_state.update(
-            "$SYS/broker/subscriptions/count",
+            "broker/subscriptions/count",
             storage_metrics.subscriptions_count,
         );
-        last_state.update("$SYS/broker/version", version!());
+        last_state.update("broker/version", version!());
 
         let interval_seconds = uptime - last_update;
         if interval_seconds > 0 {
             // 1min
             last_state.update(
-                "$SYS/broker/load/messages/received/1min",
+                "broker/load/messages/received/1min",
                 &msgs_received_load1
                     .update_interval(interval_seconds, metrics.msgs_received as f64),
             );
             last_state.update(
-                "$SYS/broker/load/messages/sent/1min",
+                "broker/load/messages/sent/1min",
                 &msgs_sent_load1.update_interval(interval_seconds, metrics.msgs_sent as f64),
             );
             last_state.update(
-                "$SYS/broker/load/publish/dropped/1min",
+                "broker/load/publish/dropped/1min",
                 &msgs_dropped_load1.update_interval(interval_seconds, metrics.msgs_dropped as f64),
             );
             last_state.update(
-                "$SYS/broker/load/publish/received/1min",
+                "broker/load/publish/received/1min",
                 &pub_msgs_received_load1
                     .update_interval(interval_seconds, metrics.pub_msgs_received as f64),
             );
             last_state.update(
-                "$SYS/broker/load/publish/sent/1min",
+                "broker/load/publish/sent/1min",
                 &pub_msgs_sent_load1
                     .update_interval(interval_seconds, metrics.pub_msgs_sent as f64),
             );
             last_state.update(
-                "$SYS/broker/load/bytes/received/1min",
+                "broker/load/bytes/received/1min",
                 &bytes_received_load1
                     .update_interval(interval_seconds, metrics.bytes_received as f64),
             );
             last_state.update(
-                "$SYS/broker/load/bytes/sent/1min",
+                "broker/load/bytes/sent/1min",
                 &bytes_sent_load1.update_interval(interval_seconds, metrics.bytes_sent as f64),
             );
             last_state.update(
-                "$SYS/broker/load/sockets/1min",
+                "broker/load/sockets/1min",
                 &sockets_load1.update_interval(interval_seconds, metrics.socket_connections as f64),
             );
             last_state.update(
-                "$SYS/broker/load/connections/1min",
+                "broker/load/connections/1min",
                 &connections_load1
                     .update_interval(interval_seconds, metrics.connection_count as f64),
             );
 
             // 5min
             last_state.update(
-                "$SYS/broker/load/messages/received/5min",
+                "broker/load/messages/received/5min",
                 &msgs_received_load5
                     .update_interval(interval_seconds, metrics.msgs_received as f64),
             );
             last_state.update(
-                "$SYS/broker/load/messages/sent/5min",
+                "broker/load/messages/sent/5min",
                 &msgs_sent_load5.update_interval(interval_seconds, metrics.msgs_sent as f64),
             );
             last_state.update(
-                "$SYS/broker/load/publish/dropped/5min",
+                "broker/load/publish/dropped/5min",
                 &msgs_dropped_load5.update_interval(interval_seconds, metrics.msgs_dropped as f64),
             );
             last_state.update(
-                "$SYS/broker/load/publish/received/5min",
+                "broker/load/publish/received/5min",
                 &pub_msgs_received_load5
                     .update_interval(interval_seconds, metrics.pub_msgs_received as f64),
             );
             last_state.update(
-                "$SYS/broker/load/publish/sent/5min",
+                "broker/load/publish/sent/5min",
                 &pub_msgs_sent_load5
                     .update_interval(interval_seconds, metrics.pub_msgs_sent as f64),
             );
             last_state.update(
-                "$SYS/broker/load/bytes/received/5min",
+                "broker/load/bytes/received/5min",
                 &bytes_received_load5
                     .update_interval(interval_seconds, metrics.bytes_received as f64),
             );
             last_state.update(
-                "$SYS/broker/load/bytes/sent/5min",
+                "broker/load/bytes/sent/5min",
                 &bytes_sent_load5.update_interval(interval_seconds, metrics.bytes_sent as f64),
             );
             last_state.update(
-                "$SYS/broker/load/sockets/5min",
+                "broker/load/sockets/5min",
                 &sockets_load5.update_interval(interval_seconds, metrics.socket_connections as f64),
             );
             last_state.update(
-                "$SYS/broker/load/connections/5min",
+                "broker/load/connections/5min",
                 &connections_load5
                     .update_interval(interval_seconds, metrics.connection_count as f64),
             );
 
             // 15min
             last_state.update(
-                "$SYS/broker/load/messages/received/15min",
+                "broker/load/messages/received/15min",
                 &msgs_received_load15
                     .update_interval(interval_seconds, metrics.msgs_received as f64),
             );
             last_state.update(
-                "$SYS/broker/load/messages/sent/15min",
+                "broker/load/messages/sent/15min",
                 &msgs_sent_load15.update_interval(interval_seconds, metrics.msgs_sent as f64),
             );
             last_state.update(
-                "$SYS/broker/load/publish/dropped/15min",
+                "broker/load/publish/dropped/15min",
                 &msgs_dropped_load15.update_interval(interval_seconds, metrics.msgs_dropped as f64),
             );
             last_state.update(
-                "$SYS/broker/load/publish/received/15min",
+                "broker/load/publish/received/15min",
                 &pub_msgs_received_load15
                     .update_interval(interval_seconds, metrics.pub_msgs_received as f64),
             );
             last_state.update(
-                "$SYS/broker/load/publish/sent/15min",
+                "broker/load/publish/sent/15min",
                 &pub_msgs_sent_load15
                     .update_interval(interval_seconds, metrics.pub_msgs_sent as f64),
             );
             last_state.update(
-                "$SYS/broker/load/bytes/received/15min",
+                "broker/load/bytes/received/15min",
                 &bytes_received_load15
                     .update_interval(interval_seconds, metrics.bytes_received as f64),
             );
             last_state.update(
-                "$SYS/broker/load/bytes/sent/15min",
+                "broker/load/bytes/sent/15min",
                 &bytes_sent_load15.update_interval(interval_seconds, metrics.bytes_sent as f64),
             );
             last_state.update(
-                "$SYS/broker/load/sockets/15min",
+                "broker/load/sockets/15min",
                 &sockets_load15
                     .update_interval(interval_seconds, metrics.socket_connections as f64),
             );
             last_state.update(
-                "$SYS/broker/load/connections/15min",
+                "broker/load/connections/15min",
                 &connections_load15
                     .update_interval(interval_seconds, metrics.connection_count as f64),
             );
         }
 
-        // publish
+        // publish to queue
         let mut msgs = Vec::new();
         for (topic, payload) in &last_state.new_values {
             msgs.push(
-                Message::new(topic.clone(), Qos::AtMostOnce, payload.clone().into_bytes())
-                    .with_retain(true),
+                Message::new(
+                    format!("$SYS/{}", topic).into(),
+                    Qos::AtMostOnce,
+                    payload.clone().into_bytes(),
+                )
+                .with_retain(true),
             );
         }
         state.storage.publish(msgs).await.ok();
-
         last_state.merge();
+
+        // publish to watch
+        state.stat_sender.send(last_state.last_values.clone()).ok();
+
         last_update = uptime;
     }
 }

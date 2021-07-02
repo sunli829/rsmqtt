@@ -1,3 +1,4 @@
+mod api;
 mod client_loop;
 mod config;
 mod defaults;
@@ -10,21 +11,17 @@ mod storage;
 mod sys_topics;
 mod ws_transport;
 
-use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use structopt::StructOpt;
-use tokio::sync::{Mutex, RwLock};
 use tracing_subscriber::fmt;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
 
 use config::{Config, StorageConfig};
-use metrics::InternalMetrics;
 use server::ServerState;
 use storage::Storage;
 
@@ -79,14 +76,7 @@ async fn run() -> Result<()> {
 
     tracing::info!(r#type = %config.storage.r#type, "create storage");
     let storage = create_storage(&config.storage)?;
-
-    let state = Arc::new(ServerState {
-        config,
-        connections: RwLock::new(HashMap::new()),
-        storage,
-        session_timeouts: Mutex::new(HashMap::new()),
-        metrics: Arc::new(InternalMetrics::default()),
-    });
+    let state = ServerState::new(config, storage).await?;
 
     if state.config.server.sys_update_interval > 0 {
         tokio::spawn(sys_topics::update_loop(

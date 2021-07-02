@@ -2,11 +2,13 @@ use std::collections::HashMap;
 use std::io::{BufReader, Cursor};
 use std::net::IpAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use bytestring::ByteString;
+use mqttv5::LastWill;
 use tokio::net::TcpListener;
-use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
+use tokio::sync::{mpsc, oneshot, watch, Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tokio_rustls::rustls::ServerConfig;
 use tokio_rustls::{rustls, TlsAcceptor};
@@ -14,6 +16,7 @@ use warp::{Filter, Reply};
 
 use crate::client_loop::run as client_loop;
 use crate::config::{Config, HttpConfig, TcpConfig};
+use crate::message::Message;
 use crate::metrics::InternalMetrics;
 use crate::storage::Storage;
 
@@ -28,6 +31,100 @@ pub struct ServerState {
     pub storage: Box<dyn Storage>,
     pub session_timeouts: Mutex<HashMap<ByteString, JoinHandle<()>>>,
     pub metrics: Arc<InternalMetrics>,
+    pub stat_sender: watch::Sender<HashMap<ByteString, ByteString>>,
+    pub stat_receiver: watch::Receiver<HashMap<ByteString, ByteString>>,
+}
+
+impl ServerState {
+    pub async fn new(config: Config, storage: Box<dyn Storage>) -> Result<Arc<Self>> {
+        let (stat_sender, stat_receiver) = watch::channel(HashMap::new());
+        let state = Arc::new(ServerState {
+            config,
+            connections: RwLock::new(HashMap::new()),
+            storage,
+            session_timeouts: Mutex::new(HashMap::new()),
+            metrics: Arc::new(InternalMetrics::default()),
+            stat_sender,
+            stat_receiver,
+        });
+
+        let sessions = state.storage.get_sessions().await?;
+        for session in sessions {
+            add_session_timeout_handle(
+                state.clone(),
+                session.client_id,
+                session.last_will,
+                session.session_expiry_interval,
+                session.last_will_expiry_interval,
+            )
+            .await;
+        }
+
+        Ok(state)
+    }
+}
+
+pub async fn add_session_timeout_handle(
+    state: Arc<ServerState>,
+    client_id: ByteString,
+    last_will: Option<LastWill>,
+    session_expiry_interval: u32,
+    last_will_expiry_interval: u32,
+) {
+    let session_timeout_handle = {
+        let state = state.clone();
+        let client_id = client_id.clone();
+
+        tokio::spawn(async move {
+            let last_will_expiry_interval = last_will_expiry_interval.min(session_expiry_interval);
+            let session_expiry_interval = if last_will_expiry_interval <= session_expiry_interval {
+                session_expiry_interval - last_will_expiry_interval
+            } else {
+                0
+            };
+
+            tokio::time::sleep(Duration::from_secs(last_will_expiry_interval as u64)).await;
+            if let Some(last_will) = last_will {
+                tracing::debug!(
+                    publisher = %client_id,
+                    topic = %last_will.topic,
+                    "send last will message",
+                );
+
+                if let Err(err) = state
+                    .storage
+                    .publish(vec![Message::from_last_will(last_will)])
+                    .await
+                {
+                    tracing::error!(
+                        error = %err,
+                        "failed to publish last will message",
+                    )
+                }
+            }
+
+            tokio::time::sleep(Duration::from_secs(session_expiry_interval as u64)).await;
+
+            tracing::debug!(
+                client_id = %client_id,
+                "session timeout",
+            );
+
+            if let Err(err) = state.storage.remove_session(&client_id).await {
+                tracing::error!(
+                    error = %err,
+                    "failed to remove session",
+                )
+            }
+            state.session_timeouts.lock().await.remove(&client_id);
+            state.metrics.inc_clients_expired(1);
+        })
+    };
+    state
+        .session_timeouts
+        .lock()
+        .await
+        .insert(client_id, session_timeout_handle);
 }
 
 async fn run_tcp_server(state: Arc<ServerState>, tcp_config: TcpConfig) -> Result<()> {
@@ -122,14 +219,33 @@ async fn run_http_server(state: Arc<ServerState>, http_config: HttpConfig) -> Re
     if http_config.websocket {
         tracing::info!("websocket transport enabled");
         routes = routes
-            .or(crate::ws_transport::handler(state.clone()).boxed())
+            .or(warp::path!("ws").and(crate::ws_transport::handler(state.clone())))
             .unify()
             .boxed();
     }
 
-    warp::serve(routes)
-        .run((http_config.host.parse::<IpAddr>()?, port))
-        .await;
+    if http_config.api {
+        tracing::info!("api enabled");
+
+        let api = warp::path!("api" / "v1" / ..)
+            .and(crate::api::stat(state.clone()))
+            .boxed();
+        routes = routes.or(api).unify().boxed();
+    }
+
+    if let Some(tls_config) = &http_config.tls {
+        warp::serve(routes)
+            .tls()
+            .cert_path(&tls_config.cert)
+            .key_path(&tls_config.key)
+            .bind((http_config.host.parse::<IpAddr>()?, port))
+            .await;
+    } else {
+        warp::serve(routes)
+            .run((http_config.host.parse::<IpAddr>()?, port))
+            .await;
+    }
+
     Ok(())
 }
 

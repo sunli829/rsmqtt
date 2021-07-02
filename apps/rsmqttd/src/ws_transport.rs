@@ -61,13 +61,15 @@ where
     }
 }
 
-pub fn handler(state: Arc<ServerState>) -> impl Filter<Extract = (Response,), Error = Rejection> {
-    warp::path!("ws")
+pub fn handler(
+    state: Arc<ServerState>,
+) -> impl Filter<Extract = (Response,), Error = Rejection> + Clone {
+    warp::any()
+        .map(move || state.clone())
         .and(warp::get())
         .and(warp::filters::addr::remote())
         .and(warp::ws())
-        .map(move |addr: Option<SocketAddr>, ws: Ws| {
-            let state = state.clone();
+        .map(move |state, addr: Option<SocketAddr>, ws: Ws| {
             let reply = ws.on_upgrade(move |websocket| async move {
                 let addr = addr
                     .map(|addr| addr.to_string())

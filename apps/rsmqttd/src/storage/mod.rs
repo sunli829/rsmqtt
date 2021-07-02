@@ -5,11 +5,19 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use bytestring::ByteString;
-use mqttv5::{LastWill, SubscribeFilter};
+use mqttv5::{LastWill, Publish, SubscribeFilter};
 use tokio::sync::Notify;
 
 use crate::filter::TopicFilter;
 use crate::message::Message;
+
+#[derive(Debug)]
+pub struct SessionInfo {
+    pub client_id: ByteString,
+    pub last_will: Option<LastWill>,
+    pub session_expiry_interval: u32,
+    pub last_will_expiry_interval: u32,
+}
 
 #[derive(Debug)]
 pub struct StorageMetrics {
@@ -36,6 +44,8 @@ pub trait Storage: Send + Sync + 'static {
 
     async fn remove_session(&self, client_id: &str) -> Result<bool>;
 
+    async fn get_sessions(&self) -> Result<Vec<SessionInfo>>;
+
     async fn subscribe(
         &self,
         client_id: &str,
@@ -57,24 +67,16 @@ pub trait Storage: Send + Sync + 'static {
 
     async fn publish(&self, msgs: Vec<Message>) -> Result<()>;
 
-    async fn add_inflight_message(
-        &self,
-        client_id: &str,
-        packet_id: NonZeroU16,
-        msg: Message,
-    ) -> Result<()>;
+    async fn add_inflight_pub_packet(&self, client_id: &str, publish: Publish) -> Result<()>;
 
-    async fn get_inflight_message(
+    async fn get_inflight_pub_packets(
         &self,
         client_id: &str,
         packet_id: NonZeroU16,
         remove: bool,
-    ) -> Result<Option<Message>>;
+    ) -> Result<Option<Publish>>;
 
-    async fn get_all_inflight_messages(
-        &self,
-        client_id: &str,
-    ) -> Result<Vec<(NonZeroU16, Message)>>;
+    async fn get_all_inflight_pub_packets(&self, client_id: &str) -> Result<Vec<Publish>>;
 
     async fn add_uncompleted_message(
         &self,
