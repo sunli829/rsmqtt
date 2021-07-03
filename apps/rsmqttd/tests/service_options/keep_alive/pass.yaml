@@ -1,0 +1,45 @@
+config:
+  max_keep_alive: 3
+step:
+  type: sequence
+  id: a
+  steps:
+    - type: connect
+    - type: send
+      packet:
+        type: connect
+        level: V5
+        clean_start: true
+    - type: recv
+      packet:
+        type: connack
+        session_present: false
+        reason_code: Success
+        properties:
+          server_keep_alive: 3
+          session_expiry_interval: 60
+          topic_alias_max: 32
+    - type: delay
+      duration: 3
+    - type: send
+      packet:
+        type: pingreq
+    - type: recv
+      packet:
+        type: pingresp
+    - type: delay
+      duration: 3
+    - type: send
+      packet:
+        type: pingreq
+    - type: recv
+      packet:
+        type: pingresp
+    - type: delay
+      duration: 3
+    - type: send
+      packet:
+        type: pingreq
+    - type: recv
+      packet:
+        type: pingresp

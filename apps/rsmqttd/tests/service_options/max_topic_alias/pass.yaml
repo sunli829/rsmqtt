@@ -1,0 +1,46 @@
+config:
+  max_topic_alias: 10
+step:
+  type: sequence
+  id: a
+  steps:
+    - type: connect
+    - type: send
+      packet:
+        type: connect
+        level: V5
+    - type: recv
+      packet:
+        type: connack
+        session_present: false
+        reason_code: Success
+        properties:
+          server_keep_alive: 30
+          session_expiry_interval: 60
+          topic_alias_max: 10
+    - type: send
+      packet:
+        type: publish
+        qos: AtLeastOnce
+        topic: test
+        packet_id: 1
+        properties:
+          topic_alias: 5
+    - type: recv
+      packet:
+        type: puback
+        packet_id: 1
+        reason_code: Success
+    - type: send
+      packet:
+        type: publish
+        qos: AtLeastOnce
+        topic: test
+        packet_id: 2
+        properties:
+          topic_alias: 9
+    - type: recv
+      packet:
+        type: puback
+        packet_id: 2
+        reason_code: Success

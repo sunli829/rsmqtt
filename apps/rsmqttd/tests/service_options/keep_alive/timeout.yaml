@@ -1,0 +1,26 @@
+step:
+  type: sequence
+  id: a
+  steps:
+    - type: connect
+    - type: send
+      packet:
+        type: connect
+        level: V5
+        clean_start: true
+        keep_alive: 3
+    - type: recv
+      packet:
+        type: connack
+        session_present: false
+        reason_code: Success
+        properties:
+          session_expiry_interval: 60
+          topic_alias_max: 32
+    - type: delay
+      duration: 6
+    - type: recv
+      packet:
+        type: disconnect
+        reason_code: KeepAliveTimeout
+    - type: eof

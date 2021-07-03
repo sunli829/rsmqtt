@@ -2,14 +2,16 @@ use bytestring::ByteString;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq, IntoPrimitive, TryFromPrimitive)]
+#[derive(
+    Debug, Copy, Clone, Eq, PartialEq, IntoPrimitive, TryFromPrimitive, Serialize, Deserialize,
+)]
 #[repr(u8)]
 pub enum Level {
     V4 = 4,
     V5 = 5,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct Login {
     pub username: ByteString,
     pub password: ByteString,

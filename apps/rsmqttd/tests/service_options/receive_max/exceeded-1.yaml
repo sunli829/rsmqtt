@@ -1,0 +1,65 @@
+config:
+  receive_max: 3
+step:
+  type: sequence
+  id: a
+  steps:
+    - type: connect
+    - type: send
+      packet:
+        type: connect
+        level: V5
+        clean_start: true
+    - type: recv
+      packet:
+        type: connack
+        session_present: false
+        reason_code: Success
+        properties:
+          server_keep_alive: 30
+          session_expiry_interval: 60
+          topic_alias_max: 32
+    - type: send
+      packet:
+        type: publish
+        qos: ExactlyOnce
+        topic: test
+        packet_id: 1
+    - type: send
+      packet:
+        type: publish
+        qos: ExactlyOnce
+        topic: test
+        packet_id: 2
+    - type: send
+      packet:
+        type: publish
+        qos: ExactlyOnce
+        topic: test
+        packet_id: 3
+    - type: send
+      packet:
+        type: publish
+        qos: ExactlyOnce
+        topic: test
+        packet_id: 4
+    - type: recv
+      packet:
+        type: pubrec
+        packet_id: 1
+        reason_code: Success
+    - type: recv
+      packet:
+        type: pubrec
+        packet_id: 2
+        reason_code: Success
+    - type: recv
+      packet:
+        type: pubrec
+        packet_id: 3
+        reason_code: Success
+    - type: recv
+      packet:
+        type: disconnect
+        reason_code: ReceiveMaximumExceeded
+    - type: eof

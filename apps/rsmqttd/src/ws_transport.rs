@@ -6,13 +6,11 @@ use std::task::Poll;
 
 use bytes::Bytes;
 use futures_util::{Sink, SinkExt, StreamExt, TryStreamExt};
+use service::{client_loop, ServiceState};
 use tokio::io::AsyncWrite;
 use warp::reply::Response;
 use warp::ws::{Message as WsMessage, Ws};
 use warp::{Filter, Rejection, Reply};
-
-use crate::client_loop::run as client_loop;
-use crate::server::ServerState;
 
 struct SinkWriter<T>(T);
 
@@ -62,7 +60,7 @@ where
 }
 
 pub fn handler(
-    state: Arc<ServerState>,
+    state: Arc<ServiceState>,
 ) -> impl Filter<Extract = (Response,), Error = Rejection> + Clone {
     warp::any()
         .map(move || state.clone())
@@ -92,7 +90,7 @@ pub fn handler(
                 );
                 tokio::pin!(reader);
 
-                client_loop(reader, SinkWriter(sink), addr.to_string(), state).await;
+                client_loop(state, reader, SinkWriter(sink), addr.to_string()).await;
 
                 tracing::debug!(
                     protocol = "websocket",

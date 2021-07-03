@@ -4,13 +4,16 @@ use std::num::NonZeroU16;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use bytestring::ByteString;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
+use serde::{Deserialize, Serialize};
 
 use crate::packet::UNSUBACK;
 use crate::reader::PacketReader;
 use crate::writer::{bytes_remaining_length, PacketWriter};
 use crate::{property, DecodeError, EncodeError, Level};
 
-#[derive(Debug, Clone, Copy, PartialEq, IntoPrimitive, TryFromPrimitive)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, IntoPrimitive, TryFromPrimitive, Serialize, Deserialize,
+)]
 #[repr(u8)]
 pub enum UnsubAckReasonCode {
     Success = 0x00,
@@ -22,9 +25,10 @@ pub enum UnsubAckReasonCode {
     PacketIdentifierInUse = 0x91,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct UnsubAckProperties {
     pub reason_string: Option<ByteString>,
+    #[serde(default)]
     pub user_properties: Vec<(ByteString, ByteString)>,
 }
 
@@ -78,10 +82,11 @@ impl UnsubAckProperties {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct UnsubAck {
     pub packet_id: NonZeroU16,
     pub reason_codes: Vec<UnsubAckReasonCode>,
+    #[serde(default)]
     pub properties: UnsubAckProperties,
 }
 

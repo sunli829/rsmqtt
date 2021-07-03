@@ -1,0 +1,22 @@
+config:
+  max_keep_alive: 60
+step:
+  type: sequence
+  id: a
+  steps:
+    - type: connect
+    - type: send
+      packet:
+        type: connect
+        level: V5
+        keep_alive: 120
+        clean_start: true
+    - type: recv
+      packet:
+        type: connack
+        session_present: false
+        reason_code: Success
+        properties:
+          server_keep_alive: 60
+          session_expiry_interval: 60
+          topic_alias_max: 32

@@ -53,6 +53,9 @@ where
     }
 
     pub async fn encode(&mut self, packet: &Packet) -> Result<usize, EncodeError> {
+        if let Packet::Connect(connect) = &packet {
+            self.level = connect.level;
+        }
         packet.encode(&mut self.write_buf, self.level, self.output_max_size)?;
         self.writer.write_all(&self.write_buf).await?;
         let size = self.write_buf.len();

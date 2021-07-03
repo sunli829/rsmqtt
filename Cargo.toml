@@ -1,6 +1,8 @@
 [workspace]
 members = [
     "libs/codec",
+    "libs/service",
+    "libs/testutil",
 
     "apps/rsmqttd",
 #    "apps/rsmqtt_bench",

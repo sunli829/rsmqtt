@@ -1,17 +1,16 @@
 use std::sync::Arc;
 
 use serde::Serialize;
+use service::ServiceState;
 use warp::reply::Response;
 use warp::{Filter, Rejection, Reply};
 
-use crate::server::ServerState;
-
 pub fn stat(
-    state: Arc<ServerState>,
+    state: Arc<ServiceState>,
 ) -> impl Filter<Extract = (Response,), Error = Rejection> + Clone {
     warp::path!("stat")
         .and(warp::any().map(move || state.clone()))
-        .map(|state: Arc<ServerState>| {
+        .map(|state: Arc<ServiceState>| {
             #[derive(Serialize)]
             struct Item<'a> {
                 name: &'a str,

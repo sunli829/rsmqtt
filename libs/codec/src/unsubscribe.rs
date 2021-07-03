@@ -3,14 +3,16 @@ use std::num::NonZeroU16;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use bytestring::ByteString;
+use serde::{Deserialize, Serialize};
 
 use crate::packet::UNSUBSCRIBE;
 use crate::reader::PacketReader;
 use crate::writer::{bytes_remaining_length, PacketWriter};
 use crate::{property, DecodeError, EncodeError, Level};
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct UnsubscribeProperties {
+    #[serde(default)]
     pub user_properties: Vec<(ByteString, ByteString)>,
 }
 
@@ -55,10 +57,11 @@ impl UnsubscribeProperties {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct Unsubscribe {
     pub packet_id: NonZeroU16,
     pub filters: Vec<ByteString>,
+    #[serde(default)]
     pub properties: UnsubscribeProperties,
 }
 

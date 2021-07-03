@@ -1,0 +1,22 @@
+config:
+  maximum_qos: AtMostOnce
+step:
+  type: sequence
+  id: a
+  steps:
+    - type: connect
+    - type: send
+      packet:
+        type: connect
+        level: V5
+        keep_alive: 15
+        clean_start: true
+    - type: recv
+      packet:
+        type: connack
+        session_present: false
+        reason_code: Success
+        properties:
+          session_expiry_interval: 60
+          topic_alias_max: 32
+          maximum_qos: AtMostOnce

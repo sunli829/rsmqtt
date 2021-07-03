@@ -3,20 +3,23 @@ use std::num::NonZeroU16;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use bytestring::ByteString;
+use serde::{Deserialize, Serialize};
 
 use crate::packet::PUBLISH;
 use crate::reader::PacketReader;
 use crate::writer::{bytes_remaining_length, PacketWriter};
 use crate::{property, DecodeError, EncodeError, Level, Qos};
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PublishProperties {
     pub payload_format_indicator: Option<bool>,
     pub message_expiry_interval: Option<u32>,
     pub topic_alias: Option<NonZeroU16>,
     pub response_topic: Option<ByteString>,
     pub correlation_data: Option<Bytes>,
+    #[serde(default)]
     pub user_properties: Vec<(ByteString, ByteString)>,
+    #[serde(default)]
     pub subscription_identifiers: Vec<usize>,
     pub content_type: Option<ByteString>,
 }
@@ -134,14 +137,18 @@ impl PublishProperties {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Publish {
+    #[serde(default)]
     pub dup: bool,
     pub qos: Qos,
+    #[serde(default)]
     pub retain: bool,
     pub topic: ByteString,
     pub packet_id: Option<NonZeroU16>,
+    #[serde(default)]
     pub properties: PublishProperties,
+    #[serde(default)]
     pub payload: Bytes,
 }
 
@@ -229,7 +236,7 @@ impl Publish {
         data.put_u8((PUBLISH << 4) | flag);
 
         let size = self.variable_header_length(level)? + self.payload_length(level)?;
-        ensure!(size < max_size, EncodeError::PacketTooLarge);
+        ensure!(size <= max_size, EncodeError::PacketTooLarge);
         data.write_remaining_length(size)?;
 
         data.write_string(&self.topic)?;

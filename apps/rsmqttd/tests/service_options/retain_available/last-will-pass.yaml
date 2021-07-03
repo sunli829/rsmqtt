@@ -1,0 +1,25 @@
+config:
+  retain_available: true
+step:
+  type: sequence
+  id: a
+  steps:
+    - type: connect
+    - type: send
+      packet:
+        type: connect
+        level: V5
+        clean_start: true
+        last_will:
+          topic: test
+          qos: ExactlyOnce
+          retain: true
+    - type: recv
+      packet:
+        type: connack
+        session_present: false
+        reason_code: Success
+        properties:
+          server_keep_alive: 30
+          session_expiry_interval: 60
+          topic_alias_max: 32

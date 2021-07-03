@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use bytestring::ByteString;
 use codec::{
-    Codec, ConnAck, ConnAckProperties, Connect, ConnectReasonCode, Disconnect,
+    Codec, ConnAck, ConnAckProperties, Connect, ConnectReasonCode, DecodeError, Disconnect,
     DisconnectProperties, DisconnectReasonCode, EncodeError, LastWill, Packet, PubAck,
     PubAckProperties, PubAckReasonCode, PubComp, PubCompProperties, PubCompReasonCode, PubRec,
     PubRecProperties, PubRecReasonCode, PubRel, PubRelProperties, PubRelReasonCode, Publish, Qos,
@@ -17,14 +17,14 @@ use fnv::FnvHashMap;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, oneshot, Notify};
 
-use crate::defaults;
 use crate::error::{Error, MqttError};
 use crate::filter::{self, TopicFilter};
 use crate::message::Message;
-use crate::server::{Control, ServerState};
+use crate::state::Control;
+use crate::ServiceState;
 
 pub struct Connection<R, W> {
-    state: Arc<ServerState>,
+    state: Arc<ServiceState>,
     remote_addr: String,
     client_id: Option<ByteString>,
     control_sender: Option<mpsc::UnboundedSender<Control>>,
@@ -35,7 +35,7 @@ pub struct Connection<R, W> {
     receive_out_max: usize,
     receive_in_quota: usize,
     receive_out_quota: usize,
-    topic_alias_max: usize,
+    max_topic_alias: usize,
     topic_alias: FnvHashMap<NonZeroU16, ByteString>,
     keep_alive: u16,
     last_active: Instant,
@@ -118,76 +118,84 @@ where
             return Err(MqttError::new(DisconnectReasonCode::ProtocolError).into());
         }
 
-        let session_expiry_interval = match (
-            connect.properties.session_expiry_interval,
-            self.state.config.server.session_expiry_interval,
-        ) {
-            (Some(client), Some(config)) if client > config => {
-                conn_ack_properties.session_expiry_interval = Some(config);
-                config
+        let session_expiry_interval = {
+            match connect.properties.session_expiry_interval {
+                Some(session_expiry_interval)
+                    if session_expiry_interval > self.state.config.max_session_expiry_interval =>
+                {
+                    conn_ack_properties.session_expiry_interval =
+                        Some(self.state.config.max_session_expiry_interval);
+                    self.state.config.max_session_expiry_interval
+                }
+                Some(session_expiry_interval) => session_expiry_interval,
+                None => {
+                    conn_ack_properties.session_expiry_interval =
+                        Some(self.state.config.max_session_expiry_interval);
+                    self.state.config.max_session_expiry_interval
+                }
             }
-            (Some(client), Some(_) | None) => client,
-            (None, Some(config)) => config,
-            (None, None) => defaults::SESSION_EXPIRY_INTERVAL,
         };
 
-        let keep_alive = connect.keep_alive.min(defaults::KEEP_ALIVE);
-        if keep_alive != connect.keep_alive {
-            conn_ack_properties.server_keep_alive = Some(keep_alive);
-        }
+        let keep_alive = {
+            if connect.keep_alive > self.state.config.max_keep_alive {
+                conn_ack_properties.server_keep_alive = Some(self.state.config.max_keep_alive);
+                self.state.config.max_keep_alive
+            } else {
+                connect.keep_alive
+            }
+        };
 
-        let receive_in_max = self
-            .state
-            .config
-            .server
-            .receive_max
-            .unwrap_or(defaults::RECEIVE_IN_MAXIMUM) as usize;
-
+        let receive_in_max = self.state.config.receive_max as usize;
         let receive_out_max = connect
             .properties
             .receive_max
             .map(|x| x as usize)
             .unwrap_or(usize::MAX);
 
-        if self.state.config.server.maximum_qos != Some(Qos::ExactlyOnce) {
-            conn_ack_properties.maximum_qos = self.state.config.server.maximum_qos;
+        if self.state.config.maximum_qos != Qos::ExactlyOnce {
+            conn_ack_properties.maximum_qos = Some(self.state.config.maximum_qos);
         }
 
         let max_packet_size_out = connect.properties.max_packet_size.unwrap_or(u32::MAX);
-        let max_packet_size_in = self.state.config.server.max_packet_size.unwrap_or(u32::MAX);
+        let max_packet_size_in = self.state.config.max_packet_size;
         if max_packet_size_in != u32::MAX {
             conn_ack_properties.max_packet_size = Some(max_packet_size_in);
         }
 
-        let topic_alias_max = match (
-            connect.properties.topic_alias_max,
-            self.state.config.server.topic_alias_max,
-        ) {
-            (Some(client), Some(config)) if client > config => {
-                conn_ack_properties.topic_alias_max = Some(config);
-                config
+        if !self.state.config.retain_available {
+            conn_ack_properties.retain_available = Some(false);
+        }
+
+        let max_topic_alias = {
+            match connect.properties.topic_alias_max {
+                Some(topic_alias_max) if topic_alias_max > self.state.config.max_topic_alias => {
+                    conn_ack_properties.topic_alias_max = Some(self.state.config.max_topic_alias);
+                    self.state.config.max_topic_alias
+                }
+                Some(topic_alias_max) => topic_alias_max,
+                None => {
+                    conn_ack_properties.topic_alias_max = Some(self.state.config.max_topic_alias);
+                    self.state.config.max_topic_alias
+                }
             }
-            (Some(client), Some(_) | None) => client,
-            (None, Some(config)) => config,
-            (None, None) => defaults::TOPIC_ALIAS_MAX,
         };
 
         if let Some(last_will) = &connect.last_will {
-            if Some(last_will.qos) > conn_ack_properties.maximum_qos {
+            if last_will.qos > self.state.config.maximum_qos {
                 self.send_packet(&Packet::ConnAck(ConnAck {
                     session_present: false,
                     reason_code: ConnectReasonCode::QoSNotSupported,
-                    properties: conn_ack_properties,
+                    properties: ConnAckProperties::default(),
                 }))
                 .await?;
                 return Ok(());
             }
 
-            if last_will.retain && self.state.config.server.retain_available.unwrap_or(true) {
+            if last_will.retain && !self.state.config.retain_available {
                 self.send_packet(&Packet::ConnAck(ConnAck {
                     session_present: false,
                     reason_code: ConnectReasonCode::RetainNotSupported,
-                    properties: conn_ack_properties,
+                    properties: ConnAckProperties::default(),
                 }))
                 .await?;
                 return Ok(());
@@ -203,7 +211,7 @@ where
                 self.send_packet(&Packet::ConnAck(ConnAck {
                     session_present: false,
                     reason_code: ConnectReasonCode::ClientIdentifierNotValid,
-                    properties: conn_ack_properties,
+                    properties: ConnAckProperties::default(),
                 }))
                 .await?;
                 return Err(Error::ServerDisconnectWithoutReason);
@@ -261,7 +269,7 @@ where
         self.receive_out_max = receive_out_max;
         self.receive_in_quota = receive_in_max;
         self.receive_out_quota = receive_out_max;
-        self.topic_alias_max = topic_alias_max as usize;
+        self.max_topic_alias = max_topic_alias as usize;
         self.session_expiry_interval = session_expiry_interval;
         self.last_will_expiry_interval = last_will_expiry_interval;
         self.last_will = connect.last_will.clone();
@@ -336,10 +344,7 @@ where
             .inc_pub_bytes_received(publish.payload.len());
         self.state.metrics.inc_pub_msgs_received(1);
 
-        if matches!((
-            self.state.config.server.topic_alias_max,
-            publish.properties.topic_alias,
-        ), (Some(config), Some(client)) if client.get() > config)
+        if matches!(publish.properties.topic_alias, Some(client) if client.get() > self.state.config.max_topic_alias)
         {
             // A Topic Alias value of 0 or greater than the Maximum Topic Alias is a Protocol Error, the
             // receiver uses DISCONNECT with Reason Code of 0x94 (Topic Alias invalid) as described in section 4.13.
@@ -367,7 +372,7 @@ where
             return Err(MqttError::new(DisconnectReasonCode::TopicNameInvalid).into());
         }
 
-        if publish.retain && !self.state.config.server.retain_available.unwrap_or(true) {
+        if publish.retain && !self.state.config.retain_available {
             // If the Server included Retain Available in its CONNACK response to a Client
             // with its value set to 0 and it receives a PUBLISH packet with the RETAIN flag is
             // set to 1, then it uses the DISCONNECT Reason Code of 0x9A (Retain not supported) as
@@ -443,12 +448,7 @@ where
             Qos::ExactlyOnce => {
                 if self.receive_in_quota == 0 {
                     self.state.metrics.inc_msg_dropped(1);
-                    self.send_packet(&Packet::PubRec(PubRec {
-                        packet_id: packet_id.unwrap(),
-                        reason_code: PubRecReasonCode::QuotaExceeded,
-                        properties: PubRecProperties::default(),
-                    }))
-                    .await?;
+                    return Err(MqttError::new(DisconnectReasonCode::ReceiveMaximumExceeded).into());
                 }
 
                 match self
@@ -458,6 +458,7 @@ where
                     .await
                 {
                     Ok(()) => {
+                        self.receive_in_quota -= 1;
                         self.send_packet(&Packet::PubRec(PubRec {
                             packet_id: packet_id.unwrap(),
                             reason_code: PubRecReasonCode::Success,
@@ -517,7 +518,20 @@ where
         };
 
         if pub_rec.reason_code != PubRecReasonCode::Success {
-            return Err(MqttError::new(DisconnectReasonCode::ProtocolError).into());
+            match self
+                .state
+                .storage
+                .get_inflight_pub_packets(client_id, pub_rec.packet_id, true)
+                .await
+            {
+                Ok(Some(_)) => {}
+                Ok(None) => return Err(MqttError::new(DisconnectReasonCode::ProtocolError).into()),
+                Err(err) => {
+                    tracing::error!(error = %err, "failed to get inflight packet");
+                    return Err(MqttError::new(DisconnectReasonCode::UnspecifiedError).into());
+                }
+            }
+            return Ok(());
         }
 
         match self
@@ -550,7 +564,20 @@ where
         };
 
         if pub_rel.reason_code != PubRelReasonCode::Success {
-            return Err(MqttError::new(DisconnectReasonCode::ProtocolError).into());
+            match self
+                .state
+                .storage
+                .get_uncompleted_message(client_id, pub_rel.packet_id, true)
+                .await
+            {
+                Ok(Some(_)) => {}
+                Ok(None) => return Err(MqttError::new(DisconnectReasonCode::ProtocolError).into()),
+                Err(err) => {
+                    tracing::error!(error = %err, "failed to get uncompleted packet");
+                    return Err(MqttError::new(DisconnectReasonCode::UnspecifiedError).into());
+                }
+            }
+            return Ok(());
         }
 
         match self
@@ -604,7 +631,20 @@ where
         };
 
         if pub_comp.reason_code != PubCompReasonCode::Success {
-            return Err(MqttError::new(DisconnectReasonCode::ProtocolError).into());
+            match self
+                .state
+                .storage
+                .get_inflight_pub_packets(client_id, pub_comp.packet_id, true)
+                .await
+            {
+                Ok(Some(_)) => {}
+                Ok(None) => return Err(MqttError::new(DisconnectReasonCode::ProtocolError).into()),
+                Err(err) => {
+                    tracing::error!(error = %err, "failed to get inflight packet");
+                    return Err(MqttError::new(DisconnectReasonCode::UnspecifiedError).into());
+                }
+            }
+            return Ok(());
         }
 
         tracing::debug!(
@@ -666,23 +706,12 @@ where
                 return Err(MqttError::new(DisconnectReasonCode::ProtocolError).into());
             }
 
-            if !self
-                .state
-                .config
-                .server
-                .wildcard_subscription_available
-                .unwrap_or(true)
-                && topic_filter.has_wildcards()
-            {
+            if !self.state.config.wildcard_subscription_available && topic_filter.has_wildcards() {
                 reason_codes.push(SubscribeReasonCode::WildcardSubscriptionsNotSupported);
                 continue;
             }
 
-            let qos = if let Some(config) = self.state.config.server.maximum_qos {
-                config.min(filter.qos)
-            } else {
-                filter.qos
-            };
+            let qos = filter.qos.min(self.state.config.maximum_qos);
 
             reason_codes.push(match qos {
                 Qos::AtMostOnce => SubscribeReasonCode::QoS0,
@@ -902,12 +931,13 @@ where
     }
 }
 
-pub async fn run(
+pub async fn client_loop(
+    state: Arc<ServiceState>,
     reader: impl AsyncRead + Send + Unpin,
     writer: impl AsyncWrite + Send + Unpin,
-    remote_addr: String,
-    state: Arc<ServerState>,
+    remote_addr: impl Into<String>,
 ) {
+    let remote_addr = remote_addr.into();
     state.metrics.inc_socket_connections(1);
 
     let (control_sender, mut control_receiver) = mpsc::unbounded_channel();
@@ -923,20 +953,21 @@ pub async fn run(
         receive_out_max: 0,
         receive_in_quota: 0,
         receive_out_quota: 0,
-        topic_alias_max: 0,
+        max_topic_alias: 0,
         topic_alias: FnvHashMap::default(),
-        keep_alive: defaults::KEEP_ALIVE,
+        keep_alive: 60,
         last_active: Instant::now(),
         last_will: None,
         last_will_expiry_interval: 0,
         next_packet_id: 1,
     };
-    let mut keep_alive_interval = tokio::time::interval(Duration::from_secs(10));
+    let mut keep_alive_interval = tokio::time::interval(Duration::from_secs(1));
 
     loop {
         tokio::select! {
             _ = keep_alive_interval.tick() => {
-                if connection.last_active.elapsed().as_secs() > connection.keep_alive as u64 {
+                if connection.keep_alive > 0 &&
+                    connection.last_active.elapsed().as_secs() > connection.keep_alive as u64 * 3 / 2 {
                     tracing::debug!(
                         remote_addr = %connection.remote_addr,
                         "keep alive timeout",
@@ -982,6 +1013,13 @@ pub async fn run(
                         }
                     }
                     Ok(None) => break,
+                    Err(DecodeError::PacketTooLarge) => {
+                        connection.send_disconnect(
+                            DisconnectReasonCode::PacketTooLarge,
+                            None,
+                        ).await.ok();
+                        break;
+                    }
                     Err(err) => {
                         tracing::debug!(
                             remote_addr = %connection.remote_addr,
@@ -1036,7 +1074,7 @@ pub async fn run(
             .remove(&client_id);
         connection.state.metrics.dec_connection_count(1);
 
-        crate::server::add_session_timeout_handle(
+        crate::state::add_session_timeout_handle(
             state.clone(),
             client_id,
             connection.last_will,

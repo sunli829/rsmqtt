@@ -3,6 +3,7 @@ use std::convert::TryInto;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use bytestring::ByteString;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
+use serde::{Deserialize, Serialize};
 
 use crate::packet::DISCONNECT;
 use crate::reader::PacketReader;
@@ -10,7 +11,9 @@ use crate::writer::bytes_remaining_length;
 use crate::writer::PacketWriter;
 use crate::{property, DecodeError, EncodeError, Level};
 
-#[derive(Debug, Clone, Copy, PartialEq, IntoPrimitive, TryFromPrimitive)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, IntoPrimitive, TryFromPrimitive, Serialize, Deserialize,
+)]
 #[repr(u8)]
 pub enum DisconnectReasonCode {
     NormalDisconnection = 0x00,
@@ -45,10 +48,11 @@ pub enum DisconnectReasonCode {
 }
 
 /// DISCONNECT Properties
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct DisconnectProperties {
     pub session_expiry_interval: Option<u32>,
     pub reason_string: Option<ByteString>,
+    #[serde(default)]
     pub user_properties: Vec<(ByteString, ByteString)>,
     pub server_reference: Option<ByteString>,
 }
@@ -130,12 +134,13 @@ impl DisconnectProperties {
 }
 
 /// Disconnect notification
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct Disconnect {
     /// Disconnect Reason Code
     pub reason_code: DisconnectReasonCode,
 
     /// Disconnect Properties
+    #[serde(default)]
     pub properties: DisconnectProperties,
 }
 

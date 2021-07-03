@@ -4,15 +4,17 @@ use std::num::NonZeroU16;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use bytestring::ByteString;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
+use serde::{Deserialize, Serialize};
 
 use crate::packet::SUBSCRIBE;
 use crate::reader::PacketReader;
 use crate::writer::{bytes_remaining_length, PacketWriter};
 use crate::{property, DecodeError, EncodeError, Level, Qos};
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Deserialize, Serialize, PartialEq)]
 pub struct SubscribeProperties {
     pub id: Option<usize>,
+    #[serde(default)]
     pub user_properties: Vec<(ByteString, ByteString)>,
 }
 
@@ -68,7 +70,9 @@ impl SubscribeProperties {
     }
 }
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq, IntoPrimitive, TryFromPrimitive)]
+#[derive(
+    Debug, Copy, Clone, Eq, PartialEq, IntoPrimitive, TryFromPrimitive, Deserialize, Serialize,
+)]
 #[repr(u8)]
 pub enum RetainHandling {
     /// Send retained messages at the time of the subscribe
@@ -81,13 +85,20 @@ pub enum RetainHandling {
     Never = 2,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct SubscribeFilter {
     pub path: ByteString,
     pub qos: Qos,
+    #[serde(default)]
     pub no_local: bool,
+    #[serde(default)]
     pub retain_as_published: bool,
+    #[serde(default = "default_retain_handling")]
     pub retain_handling: RetainHandling,
+}
+
+fn default_retain_handling() -> RetainHandling {
+    RetainHandling::OnEverySubscribe
 }
 
 impl SubscribeFilter {
@@ -163,9 +174,10 @@ impl SubscribeFilter {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct Subscribe {
     pub packet_id: NonZeroU16,
+    #[serde(default)]
     pub properties: SubscribeProperties,
     pub filters: Vec<SubscribeFilter>,
 }

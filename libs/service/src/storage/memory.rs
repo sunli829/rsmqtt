@@ -146,7 +146,7 @@ impl Storage for StorageMemory {
             .read()
             .notify
             .clone();
-        Ok((!session_present, notify))
+        Ok((session_present, notify))
     }
 
     async fn remove_session(&self, client_id: &str) -> Result<bool> {

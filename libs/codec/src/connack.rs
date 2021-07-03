@@ -3,13 +3,16 @@ use std::convert::TryInto;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use bytestring::ByteString;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
+use serde::{Deserialize, Serialize};
 
 use crate::packet::CONNACK;
 use crate::reader::PacketReader;
 use crate::writer::{bytes_remaining_length, PacketWriter};
 use crate::{property, DecodeError, EncodeError, Level, Qos};
 
-#[derive(Debug, Clone, Copy, PartialEq, IntoPrimitive, TryFromPrimitive)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, IntoPrimitive, TryFromPrimitive, Serialize, Deserialize,
+)]
 #[repr(u8)]
 pub enum ConnectReasonCode {
     Success = 0,
@@ -77,7 +80,7 @@ impl From<ConnectReasonCode> for ConnectReasonCodeV4 {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct ConnAckProperties {
     pub session_expiry_interval: Option<u32>,
     pub receive_max: Option<u16>,
@@ -87,6 +90,7 @@ pub struct ConnAckProperties {
     pub assigned_client_identifier: Option<ByteString>,
     pub topic_alias_max: Option<u16>,
     pub reason_string: Option<ByteString>,
+    #[serde(default)]
     pub user_properties: Vec<(ByteString, ByteString)>,
     pub wildcard_subscription_available: Option<bool>,
     pub subscription_identifiers_available: Option<bool>,
@@ -284,10 +288,12 @@ impl ConnAckProperties {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct ConnAck {
+    #[serde(default)]
     pub session_present: bool,
     pub reason_code: ConnectReasonCode,
+    #[serde(default)]
     pub properties: ConnAckProperties,
 }
 

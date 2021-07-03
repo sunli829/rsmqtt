@@ -1,0 +1,22 @@
+config:
+  retain_available: false
+step:
+  type: sequence
+  id: a
+  steps:
+    - type: connect
+    - type: send
+      packet:
+        type: connect
+        level: V5
+        keep_alive: 15
+        clean_start: true
+        last_will:
+          topic: test
+          qos: ExactlyOnce
+          retain: true
+    - type: recv
+      packet:
+        type: connack
+        session_present: false
+        reason_code: RetainNotSupported

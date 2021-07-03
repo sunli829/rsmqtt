@@ -8,7 +8,7 @@ use codec::Qos;
 use version::version;
 
 use crate::message::Message;
-use crate::server::ServerState;
+use crate::state::ServiceState;
 
 struct Load {
     duration: f64,
@@ -76,7 +76,11 @@ impl LastState {
     }
 }
 
-pub async fn update_loop(state: Arc<ServerState>, interval: Duration) {
+pub async fn sys_topics_update_loop(state: Arc<ServiceState>) {
+    if state.config.sys_update_interval == 0 {
+        return;
+    }
+
     let mut max_clients = 0;
     let start_time = Instant::now();
     let mut last_update = 0;
@@ -113,7 +117,7 @@ pub async fn update_loop(state: Arc<ServerState>, interval: Duration) {
     let mut connections_load15 = Load::new(900.0);
 
     loop {
-        tokio::time::sleep(interval).await;
+        tokio::time::sleep(Duration::from_secs(state.config.sys_update_interval)).await;
 
         let metrics = state.metrics.get();
         let storage_metrics = match state.storage.metrics().await {

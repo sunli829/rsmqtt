@@ -1,4 +1,5 @@
 use bytes::{BufMut, BytesMut};
+use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, ErrorKind};
 
 use crate::{
@@ -23,7 +24,8 @@ pub const PINGRESP: u8 = 13;
 pub const DISCONNECT: u8 = 14;
 // const AUTH: u8 = 15;
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "lowercase")]
 pub enum Packet {
     Connect(Connect),
     ConnAck(ConnAck),
@@ -55,10 +57,9 @@ impl Packet {
         };
         let mut packet_size = 1;
         let (len, bytes_len) = read_remaining_length(&mut reader).await?;
+        ensure!(len <= max_size, DecodeError::PacketTooLarge);
 
         packet_size += bytes_len;
-
-        ensure!(len < max_size, DecodeError::PacketTooLarge);
 
         data.resize(len, 0);
         reader
@@ -109,11 +110,11 @@ impl Packet {
             Packet::Unsubscribe(unsubscribe) => unsubscribe.encode(data, level, max_size),
             Packet::UnsubAck(unsub_ack) => unsub_ack.encode(data, level, max_size),
             Packet::PingReq => {
-                data.put_slice(&[PINGREQ, 0]);
+                data.put_slice(&[PINGREQ << 4, 0]);
                 Ok(())
             }
             Packet::PingResp => {
-                data.put_slice(&[PINGRESP, 0]);
+                data.put_slice(&[PINGRESP << 4, 0]);
                 Ok(())
             }
             Packet::Disconnect(disconnect) => disconnect.encode(data, level, max_size),

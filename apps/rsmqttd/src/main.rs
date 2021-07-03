@@ -2,22 +2,14 @@
 #![warn(clippy::default_trait_access)]
 
 mod api;
-mod client_loop;
 mod config;
-mod defaults;
-mod error;
-mod filter;
-mod message;
-mod metrics;
 mod server;
-mod storage;
-mod sys_topics;
 mod ws_transport;
 
 use std::path::PathBuf;
-use std::time::Duration;
 
 use anyhow::{Context, Result};
+use service::{ServiceState, Storage, StorageMemory};
 use structopt::StructOpt;
 use tracing_subscriber::fmt;
 use tracing_subscriber::layer::SubscriberExt;
@@ -25,8 +17,6 @@ use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
 
 use config::{Config, StorageConfig};
-use server::ServerState;
-use storage::Storage;
 
 const DEFAULT_CONFIG_FILENAME: &str = ".rsmqttd";
 
@@ -47,9 +37,9 @@ fn init_tracing() {
         .init();
 }
 
-fn create_storage(config: &StorageConfig) -> Result<Box<dyn Storage>> {
+fn create_storage(config: StorageConfig) -> Result<Box<dyn Storage>> {
     match &*config.r#type {
-        "memory" => Ok(Box::new(storage::memory::StorageMemory::default())),
+        "memory" => Ok(Box::new(StorageMemory::default())),
         _ => anyhow::bail!("unsupported storage type: {}", config.r#type),
     }
 }
@@ -67,7 +57,7 @@ async fn run() -> Result<()> {
     let config = if let Some(config_filename) = config_filename {
         tracing::info!(filename = %config_filename.display(), "load config file");
 
-        toml::from_str::<Config>(
+        serde_yaml::from_str::<Config>(
             &std::fs::read_to_string(&config_filename)
                 .with_context(|| format!("load config file '{}'.", config_filename.display()))?,
         )
@@ -78,17 +68,11 @@ async fn run() -> Result<()> {
     };
 
     tracing::info!(r#type = %config.storage.r#type, "create storage");
-    let storage = create_storage(&config.storage)?;
-    let state = ServerState::new(config, storage).await?;
+    let storage = create_storage(config.storage)?;
+    let state = ServiceState::try_new(config.service, storage).await?;
 
-    if state.config.server.sys_update_interval > 0 {
-        tokio::spawn(sys_topics::update_loop(
-            state.clone(),
-            Duration::from_secs(state.config.server.sys_update_interval),
-        ));
-    }
-
-    server::run(state).await
+    tokio::spawn(service::sys_topics_update_loop(state.clone()));
+    server::run(state, config.network).await
 }
 
 #[tokio::main]

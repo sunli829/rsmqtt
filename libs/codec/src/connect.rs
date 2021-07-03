@@ -2,6 +2,7 @@ use std::convert::TryInto;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use bytestring::ByteString;
+use serde::{Deserialize, Serialize};
 
 use crate::packet::CONNECT;
 use crate::reader::PacketReader;
@@ -17,16 +18,19 @@ const CF_CLEAN_START: u8 = 0b00000010;
 
 const QOS_SHIFT: u8 = 3;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LastWill {
     pub topic: ByteString,
+    #[serde(default)]
     pub payload: Bytes,
     pub qos: Qos,
+    #[serde(default)]
     pub retain: bool,
+    #[serde(default)]
     pub properties: WillProperties,
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WillProperties {
     pub delay_interval: Option<u32>,
     pub payload_format_indicator: Option<bool>,
@@ -34,6 +38,7 @@ pub struct WillProperties {
     pub content_type: Option<ByteString>,
     pub response_topic: Option<ByteString>,
     pub correlation_data: Option<Bytes>,
+    #[serde(default)]
     pub user_properties: Vec<(ByteString, ByteString)>,
 }
 
@@ -128,7 +133,7 @@ impl WillProperties {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct ConnectProperties {
     pub session_expiry_interval: Option<u32>,
     pub receive_max: Option<u16>,
@@ -136,6 +141,7 @@ pub struct ConnectProperties {
     pub topic_alias_max: Option<u16>,
     pub request_response_info: Option<bool>,
     pub request_problem_info: Option<bool>,
+    #[serde(default)]
     pub user_properties: Vec<(ByteString, ByteString)>,
     pub authentication_method: Option<ByteString>,
     pub authentication_data: Option<Bytes>,
@@ -255,15 +261,23 @@ impl ConnectProperties {
 }
 
 /// Connection Request
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct Connect {
     pub level: Level,
+    #[serde(default = "default_keep_alive")]
     pub keep_alive: u16,
+    #[serde(default)]
     pub clean_start: bool,
+    #[serde(default)]
     pub client_id: ByteString,
     pub last_will: Option<LastWill>,
     pub login: Option<Login>,
+    #[serde(default)]
     pub properties: ConnectProperties,
+}
+
+fn default_keep_alive() -> u16 {
+    60
 }
 
 impl Connect {
@@ -432,7 +446,7 @@ impl Connect {
 
         // write variable header
         data.write_string("MQTT")?;
-        data.put_u8(5);
+        data.put_u8(level.into());
 
         let mut flag = 0;
         if self.clean_start {

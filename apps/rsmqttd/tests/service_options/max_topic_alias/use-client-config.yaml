@@ -1,0 +1,21 @@
+config:
+  max_topic_alias: 32
+step:
+  type: sequence
+  id: a
+  steps:
+    - type: connect
+    - type: send
+      packet:
+        type: connect
+        level: V5
+        properties:
+          topic_alias_max: 16
+    - type: recv
+      packet:
+        type: connack
+        session_present: false
+        reason_code: Success
+        properties:
+          server_keep_alive: 30
+          session_expiry_interval: 60
