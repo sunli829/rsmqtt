@@ -166,6 +166,10 @@ where
             conn_ack_properties.retain_available = Some(false);
         }
 
+        if !self.state.config.wildcard_subscription_available {
+            conn_ack_properties.wildcard_subscription_available = Some(false);
+        }
+
         let max_topic_alias = {
             match connect.properties.topic_alias_max {
                 Some(topic_alias_max) if topic_alias_max > self.state.config.max_topic_alias => {

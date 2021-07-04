@@ -1,0 +1,40 @@
+config:
+  wildcard_subscription_available: false
+step:
+  type: sequence
+  id: a
+  steps:
+    - type: connect
+    - type: send
+      packet:
+        type: connect
+        level: V5
+    - type: recv
+      packet:
+        type: connack
+        session_present: false
+        reason_code: Success
+        properties:
+          server_keep_alive: 30
+          session_expiry_interval: 60
+          topic_alias_max: 32
+          wildcard_subscription_available: false
+    - type: send
+      packet:
+        type: subscribe
+        packet_id: 1
+        filters:
+          - path: "a/b"
+            qos: AtMostOnce
+          - path: "a/#"
+            qos: AtMostOnce
+          - path: "+/b"
+            qos: AtMostOnce
+    - type: recv
+      packet:
+        type: suback
+        packet_id: 1
+        reason_codes:
+          - QoS0
+          - WildcardSubscriptionsNotSupported
+          - WildcardSubscriptionsNotSupported

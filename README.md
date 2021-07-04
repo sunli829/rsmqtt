@@ -1,5 +1,12 @@
 # MQTT broker implemented in Rust
 
+<div align="center">
+  <!-- CI -->
+  <img src="https://github.com/sunli829/rsmqtt/workflows/CI/badge.svg" />
+  <!-- codecov -->
+  <img src="https://codecov.io/gh/sunli829/rsmqtt/branch/master/graph/badge.svg" />
+</div>
+
 ## TODO
 
 - Server
