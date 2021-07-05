@@ -1,16 +1,16 @@
 #![forbid(unsafe_code)]
-#![warn(default_trait_access)]
+#![warn(clippy::default_trait_access)]
 
 use std::convert::TryInto;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use bytesize::ByteSize;
 use bytestring::ByteString;
-use mqttv5::{
-    Connect, ConnectProperties, ConnectReasonCode, Packet, PacketEncoder, Publish,
+use codec::{
+    Codec, Connect, ConnectProperties, ConnectReasonCode, Level, Packet, Publish,
     PublishProperties, Qos,
 };
 use structopt::StructOpt;
@@ -91,15 +91,15 @@ async fn client_loop(
     duration: usize,
 ) -> Result<usize> {
     let mut stream = TcpStream::connect(addr).await?;
-    let (mut read_half, write_half) = stream.split();
-    let mut encoder = PacketEncoder::new(write_half);
-    let mut decode_buf = BytesMut::new();
+    let (reader, writer) = stream.split();
+    let mut codec = Codec::new(reader, writer);
     let client_id = format!("client{}", id).into();
     let topic: ByteString = format!("client{}", id).into();
 
     // connect
-    encoder
+    codec
         .encode(&Packet::Connect(Connect {
+            level: Level::V5,
             keep_alive: 60,
             clean_start: true,
             client_id,
@@ -109,7 +109,8 @@ async fn client_loop(
         }))
         .await?;
 
-    let (packet, _) = Packet::decode(&mut read_half, &mut decode_buf, None)
+    let (packet, _) = codec
+        .decode()
         .await?
         .ok_or_else(|| anyhow::anyhow!("protocol error"))?;
     let conn_ack = match packet {
@@ -134,7 +135,7 @@ async fn client_loop(
             break;
         }
 
-        encoder
+        codec
             .encode(&Packet::Publish(Publish {
                 dup: false,
                 qos: Qos::AtLeastOnce,
@@ -146,7 +147,8 @@ async fn client_loop(
             }))
             .await?;
 
-        let (packet, _) = Packet::decode(&mut read_half, &mut decode_buf, None)
+        let (packet, _) = codec
+            .decode()
             .await?
             .ok_or_else(|| anyhow::anyhow!("protocol error"))?;
         match packet {

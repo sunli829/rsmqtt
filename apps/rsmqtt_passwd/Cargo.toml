@@ -1,0 +1,8 @@
+[package]
+name = "rsmqtt_passwd"
+version = "0.1.0"
+edition = "2018"
+
+[dependencies]
+passwd_util = { path = "../../libs/passwd_util", package = "rsmqtt-passwd-util" }
+structopt = "0.3.21"

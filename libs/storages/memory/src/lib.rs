@@ -1,3 +1,6 @@
+#![forbid(unsafe_code)]
+#![warn(clippy::default_trait_access)]
+
 use std::collections::{HashMap, VecDeque};
 use std::num::NonZeroU16;
 use std::ops::Deref;
@@ -8,11 +11,8 @@ use bytestring::ByteString;
 use codec::{LastWill, Publish, Qos, RetainHandling, SubscribeFilter};
 use fnv::FnvHashMap;
 use parking_lot::{RwLock, RwLockUpgradableReadGuard};
+use service::{Message, SessionInfo, Storage, StorageMetrics, TopicFilter};
 use tokio::sync::Notify;
-
-use crate::filter::TopicFilter;
-use crate::message::Message;
-use crate::storage::{SessionInfo, Storage, StorageMetrics};
 
 macro_rules! session_not_found {
     ($client_id:expr) => {
@@ -47,7 +47,7 @@ struct Session {
 }
 
 #[derive(Default)]
-struct StorageMemoryInner {
+struct MemoryStorageInner {
     retain_messages: HashMap<ByteString, Message>,
 
     sessions: HashMap<ByteString, RwLock<Session>>,
@@ -58,7 +58,7 @@ struct StorageMemoryInner {
     share_subscriptions: HashMap<String, HashMap<String, HashMap<ByteString, Filter>>>,
 }
 
-impl StorageMemoryInner {
+impl MemoryStorageInner {
     fn add_share_subscription(&mut self, share_name: &str, client_id: &str, filter: Filter) {
         self.share_subscriptions
             .entry(share_name.to_string())
@@ -86,12 +86,12 @@ impl StorageMemoryInner {
 }
 
 #[derive(Default)]
-pub struct StorageMemory {
-    inner: RwLock<StorageMemoryInner>,
+pub struct MemoryStorage {
+    inner: RwLock<MemoryStorageInner>,
 }
 
 #[async_trait::async_trait]
-impl Storage for StorageMemory {
+impl Storage for MemoryStorage {
     async fn update_retained_message(&self, topic: ByteString, msg: Message) -> Result<()> {
         let mut inner = self.inner.write();
         if msg.is_empty() {

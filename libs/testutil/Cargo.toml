@@ -6,6 +6,7 @@ edition = "2018"
 [dependencies]
 codec = { path = "../codec", package = "rsmqtt-codec" }
 service = { path = "../service", package = "rsmqtt-service" }
+storage_memory = { path = "../storages/memory", package = "rsmqtt-storage-memory" }
 
 serde_yaml = "0.8.17"
 serde = { version = "1.0.126", features = ["derive"] }

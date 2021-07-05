@@ -24,9 +24,12 @@
     - [X] $SYS topics
     - [ ] Authentication exchange
     - [ ] Telemetry
+- Plugins
+  - [X] basic-auth
+  - [X] oso-acl
 - [ ] Admin UI
 - Test
-  - [ ] Framework
+  - [X] Framework
 - API
   - [ ] Rest API
   - [ ] GraphQL API

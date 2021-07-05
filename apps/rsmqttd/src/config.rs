@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use serde_yaml::Value;
 use service::ServiceConfig;
 
 #[derive(Debug, Deserialize, Default)]
@@ -10,7 +11,10 @@ pub struct Config {
     pub service: ServiceConfig,
 
     #[serde(default)]
-    pub storage: StorageConfig,
+    pub storage: Value,
+
+    #[serde(default)]
+    pub plugins: Vec<Value>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -78,24 +82,6 @@ impl Default for NetworkConfig {
     }
 }
 
-#[derive(Debug, Deserialize)]
-pub struct StorageConfig {
-    #[serde(default = "default_storage_type")]
-    pub r#type: String,
-}
-
-impl Default for StorageConfig {
-    fn default() -> Self {
-        Self {
-            r#type: default_storage_type(),
-        }
-    }
-}
-
 fn default_host() -> String {
     "127.0.0.1".to_string()
-}
-
-fn default_storage_type() -> String {
-    "memory".to_string()
 }

@@ -7,6 +7,7 @@ edition = "2018"
 codec = { path = "../codec", package = "rsmqtt-codec" }
 
 anyhow = "1.0.41"
+serde_yaml = "0.8.17"
 tokio = { version = "1.8.0", features = ["sync", "rt-multi-thread", "time", "macros", "net", "io-util"] }
 tracing = "0.1.26"
 tokio-stream = "0.1.6"
@@ -18,6 +19,4 @@ async-trait = "0.1.50"
 indexmap = "1.7.0"
 uuid = { version = "0.8.2", features = ["v4"] }
 thiserror = "1.0.25"
-parking_lot = "0.11.1"
-fastrand = "1.4.1"
 version = "3.0.0"

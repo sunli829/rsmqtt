@@ -6,7 +6,7 @@ use std::task::Poll;
 
 use bytes::Bytes;
 use futures_util::{Sink, SinkExt, StreamExt, TryStreamExt};
-use service::{client_loop, ServiceState};
+use service::{client_loop, RemoteAddr, ServiceState};
 use tokio::io::AsyncWrite;
 use warp::reply::Response;
 use warp::ws::{Message as WsMessage, Ws};
@@ -90,7 +90,16 @@ pub fn handler(
                 );
                 tokio::pin!(reader);
 
-                client_loop(state, reader, SinkWriter(sink), addr.to_string()).await;
+                client_loop(
+                    state,
+                    reader,
+                    SinkWriter(sink),
+                    RemoteAddr {
+                        protocol: "tcp",
+                        addr: Some(addr.clone()),
+                    },
+                )
+                .await;
 
                 tracing::debug!(
                     protocol = "websocket",

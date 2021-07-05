@@ -3,7 +3,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use service::{client_loop, ServiceState};
+use service::{client_loop, RemoteAddr, ServiceState};
 use tokio::net::TcpListener;
 use tokio_rustls::rustls::ServerConfig;
 use tokio_rustls::{rustls, TlsAcceptor};
@@ -52,7 +52,16 @@ async fn run_tcp_server(state: Arc<ServiceState>, tcp_config: TcpConfig) -> Resu
                     );
 
                     let (reader, writer) = tokio::io::split(stream);
-                    client_loop(state, reader, writer, addr.to_string()).await;
+                    client_loop(
+                        state,
+                        reader,
+                        writer,
+                        RemoteAddr {
+                            protocol: "tcp",
+                            addr: Some(addr.to_string()),
+                        },
+                    )
+                    .await;
 
                     tracing::debug!(
                         protocol = "tcp",
@@ -77,7 +86,16 @@ async fn run_tcp_server(state: Arc<ServiceState>, tcp_config: TcpConfig) -> Resu
                 );
 
                 let (reader, writer) = tokio::io::split(stream);
-                client_loop(state, reader, writer, addr.to_string()).await;
+                client_loop(
+                    state,
+                    reader,
+                    writer,
+                    RemoteAddr {
+                        protocol: "tcp",
+                        addr: Some(addr.to_string()),
+                    },
+                )
+                .await;
 
                 tracing::debug!(
                     protocol = "tcp",

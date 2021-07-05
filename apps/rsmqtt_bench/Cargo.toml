@@ -5,10 +5,10 @@ edition = "2018"
 license = "GPL-3.0"
 
 [dependencies]
+codec = { path = "../../libs/codec", package = "rsmqtt-codec" }
+
 anyhow = "1.0.41"
 bytes = "1.0.1"
-mqttv5 = { path = "../../libs/mqttv5", package = "rsmqttd-v5" }
-
 structopt = "0.3.21"
 tokio = { version = "1.7.1", features = ["rt-multi-thread", "net", "macros", "sync"] }
 bytestring = "1.0.0"
