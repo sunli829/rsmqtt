@@ -1,3 +1,5 @@
+use bytestring::ByteString;
+
 #[inline]
 pub fn valid_topic(topic: &str) -> bool {
     if topic.is_empty() {
@@ -8,7 +10,7 @@ pub fn valid_topic(topic: &str) -> bool {
 
 #[derive(Debug, Eq, PartialEq, Clone)]
 enum Segment {
-    Name(String),
+    Name(ByteString),
     NumberSign,
     PlusSign,
 }
@@ -16,7 +18,7 @@ enum Segment {
 #[derive(Clone)]
 pub struct TopicFilter {
     has_wildcards: bool,
-    share_name: Option<String>,
+    share_name: Option<ByteString>,
     segments: Vec<Segment>,
 }
 
@@ -35,7 +37,7 @@ impl TopicFilter {
             }
 
             if is_share && idx == 1 {
-                share_name = Some(s.to_string());
+                share_name = Some(s.to_string().into());
                 continue;
             }
 
@@ -53,7 +55,7 @@ impl TopicFilter {
                     segments.push(Segment::PlusSign);
                     has_wildcards = true;
                 }
-                _ => segments.push(Segment::Name(s.to_string())),
+                _ => segments.push(Segment::Name(s.to_string().into())),
             }
         }
 
@@ -95,7 +97,7 @@ impl TopicFilter {
                 (None, Segment::NumberSign) => return true,
                 (Some(t), Segment::NumberSign) if !t.starts_with('$') => return true,
                 (Some(t), Segment::PlusSign) if !t.starts_with('$') => continue,
-                (Some(t), Segment::Name(s)) if t == s => continue,
+                (Some(t), Segment::Name(s)) if t == s.as_ref() as &str => continue,
                 _ => return false,
             }
         }

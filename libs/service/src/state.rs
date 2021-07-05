@@ -11,6 +11,7 @@ use tokio::task::JoinHandle;
 use crate::config::ServiceConfig;
 use crate::message::Message;
 use crate::metrics::InternalMetrics;
+use crate::plugin::Plugin;
 use crate::storage::Storage;
 
 #[derive(Debug)]
@@ -25,11 +26,16 @@ pub struct ServiceState {
     pub(crate) session_timeouts: Mutex<HashMap<ByteString, JoinHandle<()>>>,
     pub(crate) metrics: Arc<InternalMetrics>,
     pub(crate) stat_sender: watch::Sender<HashMap<ByteString, ByteString>>,
+    pub(crate) plugins: Vec<(&'static str, Box<dyn Plugin>)>,
     pub stat_receiver: watch::Receiver<HashMap<ByteString, ByteString>>,
 }
 
 impl ServiceState {
-    pub async fn try_new(config: ServiceConfig, storage: Box<dyn Storage>) -> Result<Arc<Self>> {
+    pub async fn try_new(
+        config: ServiceConfig,
+        storage: Box<dyn Storage>,
+        plugins: Vec<(&'static str, Box<dyn Plugin>)>,
+    ) -> Result<Arc<Self>> {
         let (stat_sender, stat_receiver) = watch::channel(HashMap::new());
         let state = Arc::new(Self {
             config,
@@ -38,6 +44,7 @@ impl ServiceState {
             session_timeouts: Mutex::new(HashMap::new()),
             metrics: Arc::new(InternalMetrics::default()),
             stat_sender,
+            plugins,
             stat_receiver,
         });
 

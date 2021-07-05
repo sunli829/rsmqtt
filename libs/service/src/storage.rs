@@ -1,5 +1,3 @@
-pub mod memory;
-
 use std::num::NonZeroU16;
 use std::sync::Arc;
 

@@ -23,8 +23,8 @@ where
             reader,
             writer,
             level: Level::V4,
-            input_max_size: 64,
-            output_max_size: 64,
+            input_max_size: usize::MAX,
+            output_max_size: usize::MAX,
             read_buf: BytesMut::new(),
             write_buf: BytesMut::new(),
         }

@@ -1,3 +1,6 @@
+#![forbid(unsafe_code)]
+#![warn(clippy::default_trait_access)]
+
 mod runner;
 mod suite;
 

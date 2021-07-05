@@ -4,6 +4,13 @@ version = "0.2.0"
 edition = "2018"
 license = "GPL-3.0"
 
+[features]
+default = ["plugin-basic-auth", "plugin-oso-acl"]
+
+# plugins
+plugin-basic-auth = ["rsmqtt-plugin-basic-auth"]
+plugin-oso-acl = ["rsmqtt-plugin-oso-acl"]
+
 [[test]]
 name = "test"
 harness = false
@@ -11,6 +18,7 @@ harness = false
 [dependencies]
 codec = { path = "../../libs/codec", package = "rsmqtt-codec" }
 service = { path = "../../libs/service", package = "rsmqtt-service" }
+storage_memory = { path = "../../libs/storages/memory", package = "rsmqtt-storage-memory" }
 
 anyhow = "1.0.41"
 tokio = { version = "1.8.0", features = ["sync", "rt-multi-thread", "time", "macros", "net", "io-util"] }
@@ -29,6 +37,10 @@ tokio-rustls = "0.22.0"
 warp = { version = "0.3.1", features = ["tls"] }
 tokio-util = "0.6.7"
 futures-util = { version = "0.3.15", features = ["sink"] }
+
+# plugins
+rsmqtt-plugin-basic-auth = { path = "../../libs/plugins/basic-auth", optional = true }
+rsmqtt-plugin-oso-acl = { path = "../../libs/plugins/oso-acl", optional = true }
 
 [dev-dependencies]
 testutil = { path = "../../libs/testutil", package = "rsmqtt-testutil" }
