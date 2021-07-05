@@ -1,0 +1,64 @@
+step:
+  type: sequence
+  id: a
+  steps:
+    - type: connect
+    - type: send
+      packet:
+        type: connect
+        level: V5
+    - type: recv
+      packet:
+        type: connack
+        session_present: false
+        reason_code: Success
+        properties:
+          server_keep_alive: 30
+          session_expiry_interval: 60
+          topic_alias_max: 32
+    - type: send
+      packet:
+        type: publish
+        packet_id: 1
+        qos: ExactlyOnce
+        topic: test
+        payload: "1"
+    - type: recv
+      packet:
+        type: pubrec
+        packet_id: 1
+        reason_code: Success
+    - type: send
+      packet:
+        type: publish
+        packet_id: 1
+        qos: ExactlyOnce
+        topic: test
+        payload: "2"
+    - type: recv
+      packet:
+        type: pubrec
+        packet_id: 1
+        reason_code: PacketIdentifierInUse
+    - type: send
+      packet:
+        type: pubrel
+        packet_id: 1
+        reason_code: Success
+    - type: recv
+      packet:
+        type: pubcomp
+        packet_id: 1
+        reason_code: Success
+    - type: send
+      packet:
+        type: publish
+        packet_id: 1
+        qos: ExactlyOnce
+        topic: test
+        payload: "2"
+    - type: recv
+      packet:
+        type: pubrec
+        packet_id: 1
+        reason_code: Success

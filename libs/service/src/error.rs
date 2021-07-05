@@ -33,7 +33,7 @@ impl std::error::Error for MqttError {}
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("take over")]
-    SessionTakeOver,
+    SessionTakenOver,
 
     #[error("server disconnect: {0}")]
     ServerDisconnect(#[from] MqttError),

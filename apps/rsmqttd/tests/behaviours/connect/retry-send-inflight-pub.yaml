@@ -1,0 +1,145 @@
+step:
+  type: sequence
+  steps:
+    - type: sequence
+      id: a
+      steps:
+        - type: connect
+        - type: send
+          packet:
+            type: connect
+            level: V5
+            clean_start: true
+        - type: recv
+          packet:
+            type: connack
+            session_present: false
+            reason_code: Success
+            properties:
+              server_keep_alive: 30
+              session_expiry_interval: 60
+              topic_alias_max: 32
+    - type: sequence
+      id: b
+      steps:
+        - type: connect
+        - type: send
+          packet:
+            type: connect
+            level: V5
+            clean_start: true
+        - type: recv
+          packet:
+            type: connack
+            session_present: false
+            reason_code: Success
+            properties:
+              server_keep_alive: 30
+              session_expiry_interval: 60
+              topic_alias_max: 32
+        - type: send
+          packet:
+            type: subscribe
+            packet_id: 1
+            filters:
+              - path: test
+                qos: AtLeastOnce
+        - type: recv
+          packet:
+            type: suback
+            packet_id: 1
+            reason_codes:
+              - QoS1
+    - type: sequence
+      id: a
+      steps:
+        - type: send
+          packet:
+            type: publish
+            packet_id: 1
+            qos: AtLeastOnce
+            topic: test
+            payload: "1"
+        - type: recv
+          packet:
+            type: puback
+            packet_id: 1
+            reason_code: Success
+        - type: send
+          packet:
+            type: publish
+            packet_id: 2
+            qos: AtLeastOnce
+            topic: test
+            payload: "2"
+        - type: recv
+          packet:
+            type: puback
+            packet_id: 2
+            reason_code: Success
+    - type: sequence
+      id: b
+      steps:
+        - type: recv
+          packet:
+            type: publish
+            packet_id: 1
+            qos: AtLeastOnce
+            topic: test
+            payload: "1"
+        - type: recv
+          packet:
+            type: publish
+            packet_id: 2
+            qos: AtLeastOnce
+            topic: test
+            payload: "2"
+        - type: send
+          packet:
+            type: disconnect
+            reason_code: NormalDisconnection
+        - type: disconnect
+    - type: sequence
+      id: b
+      steps:
+        - type: connect
+        - type: send
+          packet:
+            type: connect
+            level: V5
+            clean_start: false
+        - type: recv
+          packet:
+            type: connack
+            session_present: true
+            reason_code: Success
+            properties:
+              server_keep_alive: 30
+              session_expiry_interval: 60
+              topic_alias_max: 32
+        - type: recv
+          packet:
+            type: publish
+            packet_id: 1
+            qos: AtLeastOnce
+            dup: true
+            topic: test
+            payload: "1"
+        - type: send
+          packet:
+            type: puback
+            packet_id: 1
+            reason_code: Success
+        - type: recv
+          packet:
+            type: publish
+            packet_id: 2
+            qos: AtLeastOnce
+            dup: true
+            topic: test
+            payload: "2"
+        - type: send
+          packet:
+            type: puback
+            packet_id: 2
+            reason_code: Success

@@ -1,0 +1,15 @@
+step:
+  type: sequence
+  id: ""
+  steps:
+    - type: connect
+    - type: send
+      packet:
+        type: connect
+        level: V5
+        clean_start: false
+    - type: recv
+      packet:
+        type: connack
+        session_present: false
+        reason_code: ClientIdentifierNotValid

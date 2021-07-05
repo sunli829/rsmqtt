@@ -144,6 +144,7 @@ pub struct Publish {
     pub qos: Qos,
     #[serde(default)]
     pub retain: bool,
+    #[serde(default)]
     pub topic: ByteString,
     pub packet_id: Option<NonZeroU16>,
     #[serde(default)]

@@ -1,0 +1,75 @@
+step:
+  type: sequence
+  steps:
+    - type: sequence
+      id: a
+      steps:
+        - type: connect
+        - type: send
+          packet:
+            type: connect
+            level: V5
+            clean_start: true
+            properties:
+              session_expiry_interval: 5
+            last_will:
+              topic: test
+              payload: abc
+              qos: AtMostOnce
+              properties:
+                delay_interval: 60
+        - type: recv
+          packet:
+            type: connack
+            session_present: false
+            reason_code: Success
+            properties:
+              server_keep_alive: 30
+              topic_alias_max: 32
+    - type: sequence
+      id: b
+      steps:
+        - type: connect
+        - type: send
+          packet:
+            type: connect
+            level: V5
+            clean_start: true
+        - type: recv
+          packet:
+            type: connack
+            session_present: false
+            reason_code: Success
+            properties:
+              server_keep_alive: 30
+              session_expiry_interval: 60
+              topic_alias_max: 32
+        - type: send
+          packet:
+            type: subscribe
+            packet_id: 1
+            filters:
+              - path: test
+                qos: AtMostOnce
+        - type: recv
+          packet:
+            type: suback
+            packet_id: 1
+            reason_codes:
+              - QoS0
+    - type: parallel
+      steps:
+        - type: sequence
+          id: a
+          steps:
+            - type: disconnect
+        - type: sequence
+          id: b
+          steps:
+            - type: recv
+              after: 4
+              packet:
+                type: publish
+                topic: test
+                qos: AtMostOnce
+                payload: abc

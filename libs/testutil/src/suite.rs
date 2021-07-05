@@ -15,17 +15,18 @@ pub enum Step {
     #[serde(rename = "recv")]
     Receive {
         packet: Packet,
+        after: Option<u64>,
     },
     Eof,
     Delay {
         duration: u64,
     },
     Parallel {
-        id: Option<ByteString>,
         steps: Vec<Step>,
     },
     Sequence {
         id: Option<ByteString>,
+        client_id: Option<ByteString>,
         steps: Vec<Step>,
     },
 }

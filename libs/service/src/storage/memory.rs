@@ -207,7 +207,9 @@ impl Storage for StorageMemory {
                 let is_new_subscribe = session
                     .subscription_filters
                     .insert(filter.path.clone(), filter.clone())
-                    .is_some();
+                    .is_none();
+
+                println!("***** is_new_subscribe: {}", is_new_subscribe);
 
                 let publish_retain = matches!(
                     (filter.retain_handling, is_new_subscribe),
@@ -227,7 +229,7 @@ impl Storage for StorageMemory {
                     }
 
                     if has_retain {
-                        session.notify.notify_waiters();
+                        session.notify.notify_one();
                     }
                 }
 
@@ -321,7 +323,7 @@ impl Storage for StorageMemory {
                     {
                         let mut session = RwLockUpgradableReadGuard::upgrade(session);
                         session.queue.push_back(msg);
-                        session.notify.notify_waiters();
+                        session.notify.notify_one();
                     }
                 }
 
@@ -339,7 +341,7 @@ impl Storage for StorageMemory {
                         if let Some(session) = inner.sessions.get(client_id.as_str()) {
                             let mut session = session.write();
                             session.queue.push_back(msg);
-                            session.notify.notify_waiters();
+                            session.notify.notify_one();
                         }
                     }
                 }
@@ -405,12 +407,15 @@ impl Storage for StorageMemory {
         client_id: &str,
         packet_id: NonZeroU16,
         msg: Message,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let inner = self.inner.read();
         if let Some(session) = inner.sessions.get(client_id) {
             let mut session = session.write();
+            if session.uncompleted_messages.contains_key(&packet_id) {
+                return Ok(false);
+            }
             session.uncompleted_messages.insert(packet_id, msg);
-            return Ok(());
+            return Ok(true);
         }
         session_not_found!(client_id)
     }
@@ -491,6 +496,10 @@ fn filter_message<'a>(
     let mut max_qos = Qos::AtMostOnce;
     let mut retain = msg.is_retain();
     let mut ids = Vec::new();
+
+    if msg.is_expired() {
+        return None;
+    }
 
     for filter in filters {
         if filter.no_local && msg.publisher().map(|s| &**s) == Some(client_id) {

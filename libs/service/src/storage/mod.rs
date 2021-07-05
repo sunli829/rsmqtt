@@ -83,7 +83,7 @@ pub trait Storage: Send + Sync + 'static {
         client_id: &str,
         packet_id: NonZeroU16,
         msg: Message,
-    ) -> Result<()>;
+    ) -> Result<bool>;
 
     async fn get_uncompleted_message(
         &self,

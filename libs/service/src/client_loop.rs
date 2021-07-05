@@ -23,6 +23,12 @@ use crate::message::Message;
 use crate::state::Control;
 use crate::ServiceState;
 
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+enum Qos2State {
+    Published,
+    Recorded,
+}
+
 pub struct Connection<R, W> {
     state: Arc<ServiceState>,
     remote_addr: String,
@@ -42,6 +48,7 @@ pub struct Connection<R, W> {
     last_will: Option<LastWill>,
     last_will_expiry_interval: u32,
     next_packet_id: u16,
+    inflight_qos2_messages: FnvHashMap<NonZeroU16, Qos2State>,
 }
 
 impl<R, W> Connection<R, W>
@@ -312,7 +319,7 @@ where
         .await?;
         self.state.metrics.inc_connection_count(1);
 
-        // retry send inflight packets
+        // retry send inflight publish
         match self
             .state
             .storage
@@ -322,6 +329,7 @@ where
             Ok(packets) => {
                 for mut publish in packets {
                     publish.dup = true;
+                    self.receive_out_quota -= 1;
                     self.send_packet(&Packet::Publish(publish)).await?;
                 }
             }
@@ -372,7 +380,7 @@ where
             return Err(MqttError::new(DisconnectReasonCode::TopicNameInvalid).into());
         }
 
-        if !filter::valid_topic(&publish.topic) {
+        if !publish.topic.is_empty() && !filter::valid_topic(&publish.topic) {
             return Err(MqttError::new(DisconnectReasonCode::TopicNameInvalid).into());
         }
 
@@ -461,11 +469,19 @@ where
                     .add_uncompleted_message(&client_id, packet_id.unwrap(), msg.clone())
                     .await
                 {
-                    Ok(()) => {
+                    Ok(true) => {
                         self.receive_in_quota -= 1;
                         self.send_packet(&Packet::PubRec(PubRec {
                             packet_id: packet_id.unwrap(),
                             reason_code: PubRecReasonCode::Success,
+                            properties: PubRecProperties::default(),
+                        }))
+                        .await?;
+                    }
+                    Ok(false) => {
+                        self.send_packet(&Packet::PubRec(PubRec {
+                            packet_id: packet_id.unwrap(),
+                            reason_code: PubRecReasonCode::PacketIdentifierInUse,
                             properties: PubRecProperties::default(),
                         }))
                         .await?;
@@ -521,6 +537,15 @@ where
             None => return Err(MqttError::new(DisconnectReasonCode::ProtocolError).into()),
         };
 
+        if !matches!(
+            self.inflight_qos2_messages.get(&pub_rec.packet_id),
+            Some(Qos2State::Published)
+        ) {
+            return Err(MqttError::new(DisconnectReasonCode::ProtocolError).into());
+        }
+        self.inflight_qos2_messages
+            .insert(pub_rec.packet_id, Qos2State::Recorded);
+
         if pub_rec.reason_code != PubRecReasonCode::Success {
             match self
                 .state
@@ -567,27 +592,10 @@ where
             None => return Err(MqttError::new(DisconnectReasonCode::ProtocolError).into()),
         };
 
-        if pub_rel.reason_code != PubRelReasonCode::Success {
-            match self
-                .state
-                .storage
-                .get_uncompleted_message(client_id, pub_rel.packet_id, true)
-                .await
-            {
-                Ok(Some(_)) => {}
-                Ok(None) => return Err(MqttError::new(DisconnectReasonCode::ProtocolError).into()),
-                Err(err) => {
-                    tracing::error!(error = %err, "failed to get uncompleted packet");
-                    return Err(MqttError::new(DisconnectReasonCode::UnspecifiedError).into());
-                }
-            }
-            return Ok(());
-        }
-
         match self
             .state
             .storage
-            .get_uncompleted_message(client_id, pub_rel.packet_id, false)
+            .get_uncompleted_message(client_id, pub_rel.packet_id, true)
             .await
         {
             Ok(Some(msg)) => {
@@ -601,7 +609,12 @@ where
 
                 self.send_packet(&Packet::PubComp(PubComp {
                     packet_id: pub_rel.packet_id,
-                    reason_code: PubCompReasonCode::Success,
+                    reason_code: match pub_rel.reason_code {
+                        PubRelReasonCode::Success => PubCompReasonCode::Success,
+                        PubRelReasonCode::PacketIdentifierNotFound => {
+                            PubCompReasonCode::PacketIdentifierNotFound
+                        }
+                    },
                     properties: PubCompProperties::default(),
                 }))
                 .await?;
@@ -634,29 +647,13 @@ where
             None => return Err(MqttError::new(DisconnectReasonCode::ProtocolError).into()),
         };
 
-        if pub_comp.reason_code != PubCompReasonCode::Success {
-            match self
-                .state
-                .storage
-                .get_inflight_pub_packets(client_id, pub_comp.packet_id, true)
-                .await
-            {
-                Ok(Some(_)) => {}
-                Ok(None) => return Err(MqttError::new(DisconnectReasonCode::ProtocolError).into()),
-                Err(err) => {
-                    tracing::error!(error = %err, "failed to get inflight packet");
-                    return Err(MqttError::new(DisconnectReasonCode::UnspecifiedError).into());
-                }
-            }
-            return Ok(());
+        if !matches!(
+            self.inflight_qos2_messages.get(&pub_comp.packet_id),
+            Some(Qos2State::Recorded)
+        ) {
+            return Err(MqttError::new(DisconnectReasonCode::ProtocolError).into());
         }
-
-        tracing::debug!(
-            remote_addr = %self.remote_addr,
-            client_id = %client_id,
-            packet_id = pub_comp.packet_id,
-            "remove inflight packet",
-        );
+        self.inflight_qos2_messages.remove(&pub_comp.packet_id);
 
         match self
             .state
@@ -665,6 +662,12 @@ where
             .await
         {
             Ok(Some(_)) => {
+                tracing::debug!(
+                    remote_addr = %self.remote_addr,
+                    client_id = %client_id,
+                    packet_id = pub_comp.packet_id,
+                    "remove inflight packet",
+                );
                 self.receive_out_quota += 1;
                 self.handle_notified().await?;
             }
@@ -817,7 +820,7 @@ where
                     self.state.metrics.dec_connection_count(1);
                 }
                 reply.send(()).ok();
-                Err(Error::SessionTakeOver)
+                Err(Error::SessionTakenOver)
             }
         }
     }
@@ -849,17 +852,11 @@ where
             let mut publish_err = None;
             let mut consume_count = 0;
             for msg in msgs {
-                let qos = msg.qos();
-
                 if let Err(err) = self.publish_to_client(msg).await {
                     publish_err = Some(err);
                     break;
                 }
                 consume_count += 1;
-
-                if qos > Qos::AtMostOnce {
-                    self.receive_out_quota -= 1;
-                }
             }
 
             if let Some(err) = publish_err {
@@ -903,12 +900,15 @@ where
         };
 
         self.state.metrics.inc_pub_msgs_sent(1);
-
         match publish.qos {
             Qos::AtMostOnce => self.send_packet(&Packet::Publish(publish)).await,
             Qos::AtLeastOnce | Qos::ExactlyOnce => {
                 let packet_id = self.take_packet_id();
                 publish.packet_id = Some(packet_id);
+
+                if publish.qos > Qos::AtMostOnce {
+                    self.receive_out_quota -= 1;
+                }
 
                 tracing::debug!(
                     remote_addr = %self.remote_addr,
@@ -928,6 +928,8 @@ where
                     );
                     return Err(MqttError::new(DisconnectReasonCode::ProtocolError).into());
                 }
+                self.inflight_qos2_messages
+                    .insert(packet_id, Qos2State::Published);
                 self.send_packet(&Packet::Publish(publish)).await?;
                 Ok(())
             }
@@ -964,6 +966,7 @@ pub async fn client_loop(
         last_will: None,
         last_will_expiry_interval: 0,
         next_packet_id: 1,
+        inflight_qos2_messages: FnvHashMap::default(),
     };
     let mut keep_alive_interval = tokio::time::interval(Duration::from_secs(1));
 
@@ -1038,7 +1041,7 @@ pub async fn client_loop(
                 if let Some(control) = item {
                     match connection.handle_control(control).await {
                         Ok(()) => {}
-                        Err(Error::SessionTakeOver) => {
+                        Err(Error::SessionTakenOver) => {
                             connection.send_disconnect(
                                 DisconnectReasonCode::SessionTakenOver,
                                 None,
