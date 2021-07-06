@@ -2,12 +2,15 @@ use codec::Packet;
 use serde::Deserialize;
 
 use bytestring::ByteString;
-use service::ServiceConfig;
+use serde_yaml::Value;
+use service::{RemoteAddr, ServiceConfig};
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum Step {
-    Connect,
+    Connect {
+        remote_addr: Option<RemoteAddr>,
+    },
     Disconnect,
     Send {
         packet: Packet,
@@ -35,6 +38,8 @@ pub enum Step {
 pub struct Suite {
     #[serde(default)]
     pub config: ServiceConfig,
+    #[serde(default)]
+    pub plugins: Vec<Value>,
     pub step: Step,
     #[serde(default)]
     pub disable: bool,

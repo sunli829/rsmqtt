@@ -7,17 +7,18 @@ mod error;
 mod filter;
 mod message;
 mod metrics;
-mod plugin;
 mod state;
 mod storage;
 mod sys_topics;
 
+pub mod plugin;
+
 pub use client_loop::{client_loop, RemoteAddr};
+pub use codec;
 pub use config::ServiceConfig;
 pub use error::Error;
 pub use filter::TopicFilter;
 pub use message::Message;
-pub use plugin::{Action, ConnectionInfo, Plugin, PluginFactory};
 pub use state::ServiceState;
-pub use storage::{SessionInfo, Storage, StorageMetrics};
+pub use storage::StorageMetrics;
 pub use sys_topics::sys_topics_update_loop;

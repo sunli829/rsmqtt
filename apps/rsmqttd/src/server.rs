@@ -57,8 +57,8 @@ async fn run_tcp_server(state: Arc<ServiceState>, tcp_config: TcpConfig) -> Resu
                         reader,
                         writer,
                         RemoteAddr {
-                            protocol: "tcp",
-                            addr: Some(addr.to_string()),
+                            protocol: "tcp".into(),
+                            addr: Some(addr.to_string().into()),
                         },
                     )
                     .await;
@@ -91,8 +91,8 @@ async fn run_tcp_server(state: Arc<ServiceState>, tcp_config: TcpConfig) -> Resu
                     reader,
                     writer,
                     RemoteAddr {
-                        protocol: "tcp",
-                        addr: Some(addr.to_string()),
+                        protocol: "tcp".into(),
+                        addr: Some(addr.to_string().into()),
                     },
                 )
                 .await;

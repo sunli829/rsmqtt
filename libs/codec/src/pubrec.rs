@@ -27,6 +27,13 @@ pub enum PubRecReasonCode {
     PayloadFormatInvalid = 153,
 }
 
+impl PubRecReasonCode {
+    #[inline]
+    pub fn is_success(&self) -> bool {
+        Into::<u8>::into(*self) < 0x80
+    }
+}
+
 #[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct PubRecProperties {
     pub reason_string: Option<ByteString>,

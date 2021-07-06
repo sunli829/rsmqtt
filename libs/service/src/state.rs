@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
 use bytestring::ByteString;
 use codec::LastWill;
 use tokio::sync::{mpsc, oneshot, watch, Mutex, RwLock};
@@ -21,52 +20,34 @@ pub enum Control {
 
 pub struct ServiceState {
     pub(crate) config: ServiceConfig,
-    pub(crate) connections: RwLock<HashMap<ByteString, mpsc::UnboundedSender<Control>>>,
-    pub(crate) storage: Box<dyn Storage>,
-    pub(crate) session_timeouts: Mutex<HashMap<ByteString, JoinHandle<()>>>,
+    pub(crate) connections: RwLock<HashMap<String, mpsc::UnboundedSender<Control>>>,
+    pub(crate) storage: Storage,
+    pub(crate) session_timeouts: Mutex<HashMap<String, JoinHandle<()>>>,
     pub(crate) metrics: Arc<InternalMetrics>,
-    pub(crate) stat_sender: watch::Sender<HashMap<ByteString, ByteString>>,
-    pub(crate) plugins: Vec<(&'static str, Box<dyn Plugin>)>,
-    pub stat_receiver: watch::Receiver<HashMap<ByteString, ByteString>>,
+    pub(crate) stat_sender: watch::Sender<HashMap<String, ByteString>>,
+    pub(crate) plugins: Vec<(&'static str, Arc<dyn Plugin>)>,
+    pub stat_receiver: watch::Receiver<HashMap<String, ByteString>>,
 }
 
 impl ServiceState {
-    pub async fn try_new(
-        config: ServiceConfig,
-        storage: Box<dyn Storage>,
-        plugins: Vec<(&'static str, Box<dyn Plugin>)>,
-    ) -> Result<Arc<Self>> {
+    pub fn new(config: ServiceConfig, plugins: Vec<(&'static str, Arc<dyn Plugin>)>) -> Arc<Self> {
         let (stat_sender, stat_receiver) = watch::channel(HashMap::new());
-        let state = Arc::new(Self {
+        Arc::new(Self {
             config,
             connections: RwLock::new(HashMap::new()),
-            storage,
+            storage: Storage::default(),
             session_timeouts: Mutex::new(HashMap::new()),
             metrics: Arc::new(InternalMetrics::default()),
             stat_sender,
             plugins,
             stat_receiver,
-        });
-
-        let sessions = state.storage.get_sessions().await?;
-        for session in sessions {
-            add_session_timeout_handle(
-                state.clone(),
-                session.client_id,
-                session.last_will,
-                session.session_expiry_interval,
-                session.last_will_expiry_interval,
-            )
-            .await;
-        }
-
-        Ok(state)
+        })
     }
 }
 
 pub async fn add_session_timeout_handle(
     state: Arc<ServiceState>,
-    client_id: ByteString,
+    client_id: String,
     last_will: Option<LastWill>,
     session_expiry_interval: u32,
     last_will_expiry_interval: u32,
@@ -94,7 +75,6 @@ pub async fn add_session_timeout_handle(
                 if let Err(err) = state
                     .storage
                     .publish(vec![Message::from_last_will(last_will)])
-                    .await
                 {
                     tracing::error!(
                         error = %err,
@@ -110,7 +90,7 @@ pub async fn add_session_timeout_handle(
                 "session timeout",
             );
 
-            if let Err(err) = state.storage.remove_session(&client_id).await {
+            if let Err(err) = state.storage.remove_session(&client_id) {
                 tracing::error!(
                     error = %err,
                     "failed to remove session",

@@ -1,0 +1,181 @@
+plugins:
+  - type: basic-auth
+    users:
+      sunli: $pbkdf2-sha512$i=10000,l=32$V9dNu168tQCjFG1uOyIeeQ$wWhxjmLwaVoeUzreotGPOrE34eakNn5lpk8Glr8S4mw
+      sunli2: $pbkdf2-sha512$i=10000,l=32$V9dNu168tQCjFG1uOyIeeQ$wWhxjmLwaVoeUzreotGPOrE34eakNn5lpk8Glr8S4mw
+  - type: oso-acl
+    rules: |
+      allow(conn: Connection, "pub", "test") if conn.uid = "sunli";
+
+      allow(conn: Connection, action: String, "test") if conn.addr == "1.1.1.1";
+
+      allow(conn: Connection, action: String, topic: String) if new Filter("a/+/c").test(topic);
+step:
+  type: sequence
+  id: a
+  steps:
+    # 127.0.0.1 sunli
+    - type: connect
+      remote_addr:
+        protocol: tcp
+        addr: "127.0.0.1"
+    - type: send
+      packet:
+        type: connect
+        level: V5
+        clean_start: true
+        login:
+          username: sunli
+          password: abcdef
+    - type: recv
+      packet:
+        type: connack
+        session_present: false
+        reason_code: Success
+        properties:
+          server_keep_alive: 30
+          session_expiry_interval: 60
+          topic_alias_max: 32
+    - type: send
+      packet:
+        type: publish
+        qos: AtMostOnce
+        topic: test
+        payload: "1"
+    - type: send
+      packet:
+        type: pingreq
+    - type: recv
+      packet:
+        type: pingresp
+    - type: disconnect
+    # 127.0.0.1 sunli2
+    - type: connect
+      remote_addr:
+        protocol: tcp
+        addr: "127.0.0.1"
+    - type: send
+      packet:
+        type: connect
+        level: V5
+        clean_start: true
+        login:
+          username: sunli2
+          password: abcdef
+    - type: recv
+      packet:
+        type: connack
+        session_present: false
+        reason_code: Success
+        properties:
+          server_keep_alive: 30
+          session_expiry_interval: 60
+          topic_alias_max: 32
+    - type: send
+      packet:
+        type: publish
+        qos: AtMostOnce
+        topic: test
+        payload: "1"
+    - type: recv
+      packet:
+        type: disconnect
+        reason_code: NotAuthorized
+    - type: disconnect
+    # 127.0.0.1 sunli
+    - type: connect
+      remote_addr:
+        protocol: tcp
+        addr: "127.0.0.1"
+    - type: send
+      packet:
+        type: connect
+        level: V5
+        clean_start: true
+        login:
+          username: sunli2
+          password: abcdef
+    - type: recv
+      packet:
+        type: connack
+        session_present: false
+        reason_code: Success
+        properties:
+          server_keep_alive: 30
+          session_expiry_interval: 60
+          topic_alias_max: 32
+    - type: send
+      packet:
+        type: subscribe
+        packet_id: 1
+        filters:
+          - path: test
+            qos: AtMostOnce
+    - type: recv
+      packet:
+        type: disconnect
+        reason_code: NotAuthorized
+    - type: disconnect
+    # 1.1.1.1 sunli
+    - type: connect
+      remote_addr:
+        protocol: tcp
+        addr: "1.1.1.1"
+    - type: send
+      packet:
+        type: connect
+        level: V5
+        clean_start: true
+    - type: recv
+      packet:
+        type: connack
+        session_present: false
+        reason_code: Success
+        properties:
+          server_keep_alive: 30
+          session_expiry_interval: 60
+          topic_alias_max: 32
+    - type: send
+      packet:
+        type: subscribe
+        packet_id: 1
+        filters:
+          - path: test
+            qos: AtMostOnce
+    - type: recv
+      packet:
+        type: suback
+        packet_id: 1
+        reason_codes:
+          - QoS0
+    - type: disconnect
+    # no login
+    - type: connect
+    - type: send
+      packet:
+        type: connect
+        level: V5
+        clean_start: true
+    - type: recv
+      packet:
+        type: connack
+        session_present: false
+        reason_code: Success
+        properties:
+          server_keep_alive: 30
+          session_expiry_interval: 60
+          topic_alias_max: 32
+    - type: send
+      packet:
+        type: subscribe
+        packet_id: 1
+        filters:
+          - path: a/b/c
+            qos: AtMostOnce
+    - type: recv
+      packet:
+        type: suback
+        packet_id: 1
+        reason_codes:
+          - QoS0
+    - type: disconnect

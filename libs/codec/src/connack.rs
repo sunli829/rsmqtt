@@ -39,6 +39,13 @@ pub enum ConnectReasonCode {
     ConnectionRateExceeded = 159,
 }
 
+impl ConnectReasonCode {
+    #[inline]
+    pub fn is_success(&self) -> bool {
+        Into::<u8>::into(*self) < 0x80
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, IntoPrimitive, TryFromPrimitive)]
 #[repr(u8)]
 enum ConnectReasonCodeV4 {

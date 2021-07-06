@@ -1,5 +1,5 @@
 use std::convert::TryInto;
-use std::num::NonZeroU16;
+use std::num::{NonZeroU16, NonZeroUsize};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use bytestring::ByteString;
@@ -20,7 +20,7 @@ pub struct PublishProperties {
     #[serde(default)]
     pub user_properties: Vec<(ByteString, ByteString)>,
     #[serde(default)]
-    pub subscription_identifiers: Vec<usize>,
+    pub subscription_identifiers: Vec<NonZeroUsize>,
     pub content_type: Option<ByteString>,
 }
 
@@ -42,7 +42,7 @@ impl PublishProperties {
             .subscription_identifiers
             .iter()
             .try_fold(0, |acc, &id| {
-                bytes_remaining_length(id).map(move |sz| acc + sz)
+                bytes_remaining_length(id.get()).map(move |sz| acc + 1 + sz)
             })?;
         len += prop_data_len!(self.content_type);
 
@@ -83,7 +83,7 @@ impl PublishProperties {
 
         for id in &self.subscription_identifiers {
             data.put_u8(property::SUBSCRIPTION_IDENTIFIER);
-            data.write_remaining_length(*id)?;
+            data.write_remaining_length(id.get())?;
         }
 
         if let Some(value) = &self.content_type {
@@ -124,15 +124,18 @@ impl PublishProperties {
                     properties.user_properties.push((key, value));
                 }
                 property::SUBSCRIPTION_IDENTIFIER => {
-                    properties
-                        .subscription_identifiers
-                        .push(data.read_remaining_length()?);
+                    properties.subscription_identifiers.push(
+                        data.read_remaining_length()?
+                            .try_into()
+                            .map_err(|_| DecodeError::MalformedPacket)?,
+                    );
                 }
                 property::CONTENT_TYPE => properties.content_type = Some(data.read_string()?),
                 _ => return Err(DecodeError::InvalidPublishProperty(flag)),
             }
         }
 
+        properties.subscription_identifiers.sort();
         Ok(properties)
     }
 }

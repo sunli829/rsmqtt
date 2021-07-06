@@ -1,0 +1,161 @@
+step:
+  type: sequence
+  steps:
+    - type: sequence
+      id: a
+      steps:
+        - type: connect
+        - type: send
+          packet:
+            type: connect
+            level: V5
+        - type: recv
+          packet:
+            type: connack
+            session_present: false
+            reason_code: Success
+            properties:
+              server_keep_alive: 30
+              session_expiry_interval: 60
+              topic_alias_max: 32
+    - type: sequence
+      id: b
+      steps:
+        - type: connect
+        - type: send
+          packet:
+            type: connect
+            level: V5
+        - type: recv
+          packet:
+            type: connack
+            session_present: false
+            reason_code: Success
+            properties:
+              server_keep_alive: 30
+              session_expiry_interval: 60
+              topic_alias_max: 32
+        - type: send
+          packet:
+            type: subscribe
+            packet_id: 1
+            filters:
+              - path: a
+                qos: AtMostOnce
+              - path: b
+                qos: AtMostOnce
+              - path: a/1
+                qos: AtMostOnce
+            properties:
+              id: 1
+        - type: recv
+          packet:
+            type: suback
+            packet_id: 1
+            reason_codes:
+              - QoS0
+              - QoS0
+              - QoS0
+        - type: send
+          packet:
+            type: subscribe
+            packet_id: 1
+            filters:
+              - path: c
+                qos: AtMostOnce
+              - path: d
+                qos: AtMostOnce
+              - path: a/+
+                qos: AtMostOnce
+            properties:
+              id: 2
+        - type: recv
+          packet:
+            type: suback
+            packet_id: 1
+            reason_codes:
+              - QoS0
+              - QoS0
+              - QoS0
+    - type: sequence
+      id: a
+      steps:
+        - type: send
+          packet:
+            type: publish
+            qos: AtMostOnce
+            topic: a
+            payload: "1"
+        - type: send
+          packet:
+            type: publish
+            qos: AtMostOnce
+            topic: b
+            payload: "2"
+        - type: send
+          packet:
+            type: publish
+            qos: AtMostOnce
+            topic: c
+            payload: "3"
+        - type: send
+          packet:
+            type: publish
+            qos: AtMostOnce
+            topic: d
+            payload: "4"
+        - type: send
+          packet:
+            type: publish
+            qos: AtMostOnce
+            topic: a/1
+            payload: "5"
+    - type: sequence
+      id: b
+      steps:
+        - type: recv
+          packet:
+            type: publish
+            qos: AtMostOnce
+            topic: a
+            payload: "1"
+            properties:
+              subscription_identifiers:
+                - 1
+        - type: recv
+          packet:
+            type: publish
+            qos: AtMostOnce
+            topic: b
+            payload: "2"
+            properties:
+              subscription_identifiers:
+                - 1
+        - type: recv
+          packet:
+            type: publish
+            qos: AtMostOnce
+            topic: c
+            payload: "3"
+            properties:
+              subscription_identifiers:
+                - 2
+        - type: recv
+          packet:
+            type: publish
+            qos: AtMostOnce
+            topic: d
+            payload: "4"
+            properties:
+              subscription_identifiers:
+                - 2
+        - type: recv
+          packet:
+            type: publish
+            qos: AtMostOnce
+            topic: a/1
+            payload: "5"
+            properties:
+              subscription_identifiers:
+                - 1
+                - 2

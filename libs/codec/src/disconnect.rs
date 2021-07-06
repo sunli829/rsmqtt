@@ -47,6 +47,13 @@ pub enum DisconnectReasonCode {
     WildcardSubscriptionsNotSupported = 0xA2,
 }
 
+impl DisconnectReasonCode {
+    #[inline]
+    pub fn is_success(&self) -> bool {
+        Into::<u8>::into(*self) < 0x80
+    }
+}
+
 /// DISCONNECT Properties
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct DisconnectProperties {
@@ -145,6 +152,14 @@ pub struct Disconnect {
 }
 
 impl Disconnect {
+    #[inline]
+    pub fn new(reason_code: DisconnectReasonCode) -> Self {
+        Disconnect {
+            reason_code,
+            properties: DisconnectProperties::default(),
+        }
+    }
+
     #[inline]
     fn variable_header_length(&self, level: Level) -> Result<usize, EncodeError> {
         match level {

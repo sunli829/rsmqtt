@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::convert::TryInto;
 use std::fmt::{self, Display, Formatter};
 use std::num::NonZeroU16;
@@ -15,14 +16,16 @@ use codec::{
     UnsubAckReasonCode, Unsubscribe,
 };
 use fnv::FnvHashMap;
+use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, oneshot, Notify};
 
 use crate::error::Error;
-use crate::filter::{self, TopicFilter};
+use crate::filter::{self, FilterItem, TopicFilter};
 use crate::message::Message;
+use crate::plugin::Action;
 use crate::state::Control;
-use crate::{Action, ConnectionInfo, ServiceState};
+use crate::ServiceState;
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 enum Qos2State {
@@ -30,10 +33,10 @@ enum Qos2State {
     Recorded,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteAddr {
-    pub protocol: &'static str,
-    pub addr: Option<String>,
+    pub protocol: Cow<'static, str>,
+    pub addr: Option<ByteString>,
 }
 
 impl Display for RemoteAddr {
@@ -51,7 +54,7 @@ pub struct Connection<R, W> {
     state: Arc<ServiceState>,
     remote_addr: RemoteAddr,
     client_id: Option<ByteString>,
-    control_sender: Option<mpsc::UnboundedSender<Control>>,
+    control_sender: mpsc::UnboundedSender<Control>,
     uid: Option<String>,
     notify: Arc<Notify>,
     codec: Codec<R, W>,
@@ -75,6 +78,7 @@ where
     R: AsyncRead + Send + Unpin,
     W: AsyncWrite + Send + Unpin,
 {
+    #[inline]
     fn take_packet_id(&mut self) -> NonZeroU16 {
         let id = self.next_packet_id;
         if self.next_packet_id == u16::MAX {
@@ -124,14 +128,7 @@ where
 
         for (name, plugin) in &self.state.plugins {
             match plugin
-                .check_acl(
-                    ConnectionInfo {
-                        remote_addr: &self.remote_addr,
-                        uid: self.uid.as_deref(),
-                    },
-                    action,
-                    topic,
-                )
+                .check_acl(&self.remote_addr, self.uid.as_deref(), action, topic)
                 .await
             {
                 Ok(false) => {
@@ -276,7 +273,6 @@ where
             }
         }
 
-        // create session
         if connect.client_id.is_empty() {
             // If the Server rejects the ClientID it MAY respond to the CONNECT packet with a CONNACK
             // using Reason Code 0x85 (Client Identifier not valid) as described in section 4.13 Handling
@@ -288,9 +284,7 @@ where
                     properties: ConnAckProperties::default(),
                 }))
                 .await?;
-                return Err(Error::server_disconnect(
-                    DisconnectReasonCode::ProtocolError,
-                ));
+                return Err(Error::ServerDisconnect(None));
             }
 
             connect.client_id = format!("auto-{}", uuid::Uuid::new_v4()).into();
@@ -318,37 +312,35 @@ where
                         tracing::error!(
                             plugin = %name,
                             error = %err,
-                            "failed to call plugin::auth"
+                            "failed to call plugin::auth",
                         );
-                        return Err(Error::server_disconnect(
-                            DisconnectReasonCode::UnspecifiedError,
-                        ));
+                        return Err(Error::internal_error(err));
                     }
                 }
             }
+
+            if uid.is_none() {
+                return Err(Error::server_disconnect(
+                    DisconnectReasonCode::NotAuthorized,
+                ));
+            }
         }
 
-        let (session_present, notify) = match self
-            .state
-            .storage
-            .create_session(
-                connect.client_id.clone(),
-                connect.clean_start,
-                connect.last_will.clone(),
-                session_expiry_interval,
-                last_will_expiry_interval,
-            )
-            .await
-        {
+        // create session
+        let (session_present, notify) = match self.state.storage.create_session(
+            &connect.client_id,
+            connect.clean_start,
+            connect.last_will.clone(),
+            session_expiry_interval,
+            last_will_expiry_interval,
+        ) {
             Ok(res) => res,
             Err(err) => {
                 tracing::error!(
                     error = %err,
                     "failed to create session"
                 );
-                return Err(Error::server_disconnect(
-                    DisconnectReasonCode::UnspecifiedError,
-                ));
+                return Err(Error::internal_error(err));
             }
         };
 
@@ -358,7 +350,7 @@ where
                 .session_timeouts
                 .lock()
                 .await
-                .remove(&connect.client_id)
+                .remove(&*connect.client_id)
             {
                 join_handle.abort();
             }
@@ -382,27 +374,22 @@ where
 
         loop {
             let mut connections = self.state.connections.write().await;
-            if let Some(control_sender) = connections.get(&connect.client_id).cloned() {
+            if let Some(control_sender) = connections.get(&*connect.client_id).cloned() {
                 drop(connections);
                 let (tx_reply, rx_reply) = oneshot::channel();
                 if control_sender
                     .send(Control::SessionTakenOver(tx_reply))
                     .is_err()
                 {
-                    return Err(Error::server_disconnect(
-                        DisconnectReasonCode::UnspecifiedError,
-                    ));
+                    return Err(Error::internal_error("failed to call control_sender.send"));
                 }
                 if rx_reply.await.is_err() {
-                    return Err(Error::server_disconnect(
-                        DisconnectReasonCode::UnspecifiedError,
+                    return Err(Error::internal_error(
+                        "failed to receive control_sender.reply",
                     ));
                 }
             } else {
-                connections.insert(
-                    connect.client_id.clone(),
-                    self.control_sender.take().unwrap(),
-                );
+                connections.insert(connect.client_id.to_string(), self.control_sender.clone());
                 break;
             }
         }
@@ -420,7 +407,6 @@ where
             .state
             .storage
             .get_all_inflight_pub_packets(&connect.client_id)
-            .await
         {
             Ok(packets) => {
                 for mut publish in packets {
@@ -434,9 +420,7 @@ where
                     error = %err,
                     "failed to take all inflight packets"
                 );
-                return Err(Error::server_disconnect(
-                    DisconnectReasonCode::UnspecifiedError,
-                ));
+                return Err(Error::internal_error(err));
             }
         }
 
@@ -449,7 +433,7 @@ where
             None => {
                 return Err(Error::server_disconnect(
                     DisconnectReasonCode::ProtocolError,
-                ))
+                ));
             }
         };
 
@@ -530,14 +514,11 @@ where
             }
         };
 
-        // check acl
-        self.check_acl(Action::Publish, &publish.topic).await?;
-
         let retain = publish.retain;
         let packet_id = publish.packet_id;
 
         // create message
-        let msg = Message::from_publish(Some(client_id.clone()), publish)
+        let msg = Message::from_publish(Some(client_id.clone()), &publish)
             .with_publisher(client_id.clone());
 
         if retain {
@@ -545,8 +526,7 @@ where
             if let Err(err) = self
                 .state
                 .storage
-                .update_retained_message(msg.topic().clone(), msg.clone())
-                .await
+                .update_retained_message(msg.topic(), msg.clone())
             {
                 tracing::warn!(
                     error = %err,
@@ -555,27 +535,27 @@ where
             }
         }
 
+        // check acl
+        self.check_acl(Action::Publish, &publish.topic).await?;
+
+        // do publish
         match msg.qos() {
             Qos::AtMostOnce => {
-                if let Err(err) = self.state.storage.publish(vec![msg]).await {
+                if let Err(err) = self.state.storage.publish(vec![msg]) {
                     tracing::error!(
                         error = %err,
                         "failed to publish message",
                     );
-                    return Err(Error::server_disconnect(
-                        DisconnectReasonCode::UnspecifiedError,
-                    ));
+                    return Err(Error::internal_error(err));
                 }
             }
             Qos::AtLeastOnce => {
-                if let Err(err) = self.state.storage.publish(vec![msg]).await {
+                if let Err(err) = self.state.storage.publish(vec![msg]) {
                     tracing::error!(
                         error = %err,
                         "failed to publish message",
                     );
-                    return Err(Error::server_disconnect(
-                        DisconnectReasonCode::UnspecifiedError,
-                    ));
+                    return Err(Error::internal_error(err));
                 }
                 self.send_packet(&Packet::PubAck(PubAck {
                     packet_id: packet_id.unwrap(),
@@ -592,12 +572,11 @@ where
                     ));
                 }
 
-                match self
-                    .state
-                    .storage
-                    .add_uncompleted_message(&client_id, packet_id.unwrap(), msg.clone())
-                    .await
-                {
+                match self.state.storage.add_uncompleted_message(
+                    &client_id,
+                    packet_id.unwrap(),
+                    msg.clone(),
+                ) {
                     Ok(true) => {
                         self.receive_in_quota -= 1;
                         self.send_packet(&Packet::PubRec(PubRec {
@@ -620,9 +599,7 @@ where
                             error = %err,
                             "failed to save qos2 message",
                         );
-                        return Err(Error::server_disconnect(
-                            DisconnectReasonCode::UnspecifiedError,
-                        ));
+                        return Err(Error::internal_error(err));
                     }
                 }
             }
@@ -652,7 +629,6 @@ where
             .state
             .storage
             .get_inflight_pub_packets(client_id, pub_ack.packet_id, true)
-            .await
         {
             Ok(Some(_)) => {
                 self.receive_out_quota += 1;
@@ -663,9 +639,7 @@ where
             )),
             Err(err) => {
                 tracing::error!(error = %err, "failed to get inflight packet");
-                Err(Error::server_disconnect(
-                    DisconnectReasonCode::UnspecifiedError,
-                ))
+                Err(Error::internal_error(err))
             }
         }
     }
@@ -680,23 +654,25 @@ where
             }
         };
 
-        if !matches!(
-            self.inflight_qos2_messages.get(&pub_rec.packet_id),
-            Some(Qos2State::Published)
-        ) {
-            return Err(Error::server_disconnect(
-                DisconnectReasonCode::ProtocolError,
-            ));
+        match self.inflight_qos2_messages.get_mut(&pub_rec.packet_id) {
+            Some(state) if *state != Qos2State::Published => {
+                return Err(Error::server_disconnect(
+                    DisconnectReasonCode::ProtocolError,
+                ));
+            }
+            Some(state) => *state = Qos2State::Recorded,
+            None => {
+                return Err(Error::server_disconnect(
+                    DisconnectReasonCode::ProtocolError,
+                ));
+            }
         }
-        self.inflight_qos2_messages
-            .insert(pub_rec.packet_id, Qos2State::Recorded);
 
-        if pub_rec.reason_code != PubRecReasonCode::Success {
+        if !pub_rec.reason_code.is_success() {
             match self
                 .state
                 .storage
                 .get_inflight_pub_packets(client_id, pub_rec.packet_id, true)
-                .await
             {
                 Ok(Some(_)) => {}
                 Ok(None) => {
@@ -706,9 +682,7 @@ where
                 }
                 Err(err) => {
                     tracing::error!(error = %err, "failed to get inflight packet");
-                    return Err(Error::server_disconnect(
-                        DisconnectReasonCode::UnspecifiedError,
-                    ));
+                    return Err(Error::internal_error(err));
                 }
             }
             return Ok(());
@@ -718,7 +692,6 @@ where
             .state
             .storage
             .get_inflight_pub_packets(client_id, pub_rec.packet_id, false)
-            .await
         {
             Ok(Some(_)) => {
                 self.send_packet(&Packet::PubRel(PubRel {
@@ -734,9 +707,7 @@ where
             )),
             Err(err) => {
                 tracing::error!(error = %err, "failed to get inflight packet");
-                Err(Error::server_disconnect(
-                    DisconnectReasonCode::UnspecifiedError,
-                ))
+                Err(Error::internal_error(err))
             }
         }
     }
@@ -754,18 +725,15 @@ where
         match self
             .state
             .storage
-            .get_uncompleted_message(client_id, pub_rel.packet_id, true)
-            .await
+            .remove_uncompleted_message(client_id, pub_rel.packet_id)
         {
             Ok(Some(msg)) => {
-                if let Err(err) = self.state.storage.publish(vec![msg]).await {
+                if let Err(err) = self.state.storage.publish(vec![msg]) {
                     tracing::error!(
                         error = %err,
                         "failed to publish message",
                     );
-                    return Err(Error::server_disconnect(
-                        DisconnectReasonCode::UnspecifiedError,
-                    ));
+                    return Err(Error::internal_error(err));
                 }
 
                 self.send_packet(&Packet::PubComp(PubComp {
@@ -795,9 +763,7 @@ where
                     error = %err,
                     "failed to get uncompleted message",
                 );
-                return Err(Error::server_disconnect(
-                    DisconnectReasonCode::UnspecifiedError,
-                ));
+                return Err(Error::internal_error(err));
             }
         }
 
@@ -828,7 +794,6 @@ where
             .state
             .storage
             .get_inflight_pub_packets(client_id, pub_comp.packet_id, true)
-            .await
         {
             Ok(Some(_)) => {
                 tracing::debug!(
@@ -853,9 +818,7 @@ where
                     error = %err,
                     "failed to get inflight packet",
                 );
-                return Err(Error::server_disconnect(
-                    DisconnectReasonCode::UnspecifiedError,
-                ));
+                return Err(Error::internal_error(err));
             }
         }
 
@@ -863,7 +826,7 @@ where
     }
 
     async fn handle_subscribe(&mut self, subscribe: Subscribe) -> Result<(), Error> {
-        let client_id = match &self.client_id {
+        let client_id = match self.client_id.clone() {
             Some(client_id) => client_id,
             None => {
                 return Err(Error::server_disconnect(
@@ -874,8 +837,8 @@ where
 
         let mut reason_codes = Vec::with_capacity(subscribe.filters.len());
 
-        for filter in subscribe.filters {
-            let topic_filter = match TopicFilter::try_new(&filter.path) {
+        for filter in &subscribe.filters {
+            let topic_filter = match TopicFilter::try_new(filter.path.clone()) {
                 Some(filter) => filter,
                 None => {
                     reason_codes.push(SubscribeReasonCode::TopicFilterInvalid);
@@ -906,12 +869,15 @@ where
                 Qos::ExactlyOnce => SubscribeReasonCode::QoS2,
             });
 
-            if let Err(err) = self
-                .state
-                .storage
-                .subscribe(client_id, filter, topic_filter, subscribe.properties.id)
-                .await
-            {
+            let filter_item = FilterItem {
+                topic_filter,
+                qos,
+                no_local: filter.no_local,
+                retain_as_published: filter.retain_as_published,
+                retain_handling: filter.retain_handling,
+                id: subscribe.properties.id,
+            };
+            if let Err(err) = self.state.storage.subscribe(&client_id, filter_item) {
                 tracing::error!(
                     error = %err,
                     "failed to subscribe topic",
@@ -943,7 +909,7 @@ where
         let mut reason_codes = Vec::new();
 
         for filter in unsubscribe.filters {
-            let topic_filter = match TopicFilter::try_new(&filter) {
+            let topic_filter = match TopicFilter::try_new(&*filter) {
                 Some(topic_filter) => topic_filter,
                 None => {
                     reason_codes.push(UnsubAckReasonCode::TopicFilterInvalid);
@@ -951,12 +917,7 @@ where
                 }
             };
 
-            match self
-                .state
-                .storage
-                .unsubscribe(client_id, &filter, topic_filter)
-                .await
-            {
+            match self.state.storage.unsubscribe(client_id, topic_filter) {
                 Ok(true) => reason_codes.push(UnsubAckReasonCode::Success),
                 Ok(false) => reason_codes.push(UnsubAckReasonCode::NoSubscriptionExisted),
                 Err(err) => {
@@ -964,9 +925,7 @@ where
                         error = %err,
                         "failed to unsubscribe",
                     );
-                    return Err(Error::server_disconnect(
-                        DisconnectReasonCode::UnspecifiedError,
-                    ));
+                    return Err(Error::internal_error(err));
                 }
             }
         }
@@ -993,17 +952,14 @@ where
         if disconnect.reason_code == DisconnectReasonCode::NormalDisconnection {
             self.last_will = None;
         }
-        Err(Error::client_disconnect(
-            disconnect.reason_code,
-            disconnect.properties,
-        ))
+        Err(Error::ClientDisconnect(disconnect))
     }
 
     async fn handle_control(&mut self, control: Control) -> Result<(), Error> {
         match control {
             Control::SessionTakenOver(reply) => {
                 if let Some(client_id) = self.client_id.take() {
-                    self.state.connections.write().await.remove(&client_id);
+                    self.state.connections.write().await.remove(&*client_id);
                     self.state.metrics.dec_connection_count(1);
                 }
                 reply.send(()).ok();
@@ -1022,7 +978,6 @@ where
                 .state
                 .storage
                 .next_messages(&client_id, Some(self.receive_out_quota))
-                .await
             {
                 Ok(msgs) => msgs,
                 Err(err) => {
@@ -1039,6 +994,10 @@ where
             let mut publish_err = None;
             let mut consume_count = 0;
             for msg in msgs {
+                if msg.is_expired() {
+                    continue;
+                }
+
                 if let Err(err) = self.publish_to_client(msg).await {
                     publish_err = Some(err);
                     break;
@@ -1053,9 +1012,7 @@ where
                     error = %err,
                     "failed to publish message to client",
                 );
-                return Err(Error::server_disconnect(
-                    DisconnectReasonCode::UnspecifiedError,
-                ));
+                return Err(Error::internal_error(err));
             }
 
             if consume_count > 0 {
@@ -1063,15 +1020,12 @@ where
                     .state
                     .storage
                     .consume_messages(&client_id, consume_count)
-                    .await
                 {
                     tracing::error!(
                         error = %err,
                         "failed to consume messages",
                     );
-                    return Err(Error::server_disconnect(
-                        DisconnectReasonCode::UnspecifiedError,
-                    ));
+                    return Err(Error::internal_error(err));
                 }
             }
         }
@@ -1111,7 +1065,6 @@ where
                     .state
                     .storage
                     .add_inflight_pub_packet(&client_id, publish.clone())
-                    .await
                 {
                     tracing::error!(
                         error = %err,
@@ -1143,7 +1096,7 @@ pub async fn client_loop(
         state: state.clone(),
         remote_addr,
         client_id: None,
-        control_sender: Some(control_sender),
+        control_sender,
         uid: None,
         notify: Arc::new(Notify::new()),
         codec: Codec::new(reader, writer),
@@ -1189,16 +1142,24 @@ pub async fn client_loop(
                         );
                         match connection.handle_packet(packet).await {
                             Ok(_) => {}
-                            Err(Error::ServerDisconnect { reason_code, properties }) => {
-                                tracing::debug!(
-                                    remote_addr = %connection.remote_addr,
-                                    reason_code = ?reason_code,
-                                    "server disconnect",
-                                );
-                                connection.send_disconnect(
-                                    reason_code,
-                                    Some(properties),
-                                ).await.ok();
+                            Err(Error::InternalError(_)) => {
+                                connection.send_disconnect(DisconnectReasonCode::UnspecifiedError, None).await.ok();
+                                break;
+                            }
+                            Err(Error::ServerDisconnect(disconnect)) => {
+                                if let Some(disconnect) = disconnect {
+                                    tracing::debug!(
+                                        remote_addr = %connection.remote_addr,
+                                        reason_code = ?disconnect.reason_code,
+                                        "server disconnect",
+                                    );
+                                    connection.send_packet(&Packet::Disconnect(disconnect)).await.ok();
+                                } else {
+                                    tracing::debug!(
+                                        remote_addr = %connection.remote_addr,
+                                        "server disconnect",
+                                    );
+                                }
                                 break;
                             }
                             Err(Error::ClientDisconnect { .. }) => break,
@@ -1271,12 +1232,12 @@ pub async fn client_loop(
             .connections
             .write()
             .await
-            .remove(&client_id);
+            .remove(&*client_id);
         connection.state.metrics.dec_connection_count(1);
 
         crate::state::add_session_timeout_handle(
             state.clone(),
-            client_id,
+            client_id.to_string(),
             connection.last_will,
             connection.session_expiry_interval,
             connection.last_will_expiry_interval,

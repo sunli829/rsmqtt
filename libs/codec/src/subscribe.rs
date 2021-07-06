@@ -1,5 +1,5 @@
 use std::convert::TryInto;
-use std::num::NonZeroU16;
+use std::num::{NonZeroU16, NonZeroUsize};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use bytestring::ByteString;
@@ -13,7 +13,7 @@ use crate::{property, DecodeError, EncodeError, Level, Qos};
 
 #[derive(Debug, Default, Deserialize, Serialize, PartialEq)]
 pub struct SubscribeProperties {
-    pub id: Option<usize>,
+    pub id: Option<NonZeroUsize>,
     #[serde(default)]
     pub user_properties: Vec<(ByteString, ByteString)>,
 }
@@ -35,7 +35,7 @@ impl SubscribeProperties {
     fn encode(&self, data: &mut BytesMut) -> Result<(), EncodeError> {
         if let Some(value) = self.id {
             data.put_u8(property::SUBSCRIPTION_IDENTIFIER);
-            data.write_remaining_length(value)?;
+            data.write_remaining_length(value.get())?;
         }
 
         for (key, value) in &self.user_properties {
@@ -55,7 +55,11 @@ impl SubscribeProperties {
 
             match flag {
                 property::SUBSCRIPTION_IDENTIFIER => {
-                    properties.id = Some(data.read_remaining_length()?)
+                    properties.id = Some(
+                        data.read_remaining_length()?
+                            .try_into()
+                            .map_err(|_| DecodeError::MalformedPacket)?,
+                    )
                 }
                 property::USER_PROPERTY => {
                     let key = data.read_string()?;

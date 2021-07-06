@@ -6,7 +6,7 @@ pub struct Filter(Option<TopicFilter>);
 
 impl Filter {
     pub fn new(filter: String) -> Filter {
-        Filter(TopicFilter::try_new(&filter))
+        Filter(TopicFilter::try_new(filter))
     }
 
     pub fn test(&self, topic: String) -> bool {

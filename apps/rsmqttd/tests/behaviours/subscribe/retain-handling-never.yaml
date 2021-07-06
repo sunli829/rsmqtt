@@ -46,6 +46,8 @@ step:
             topic: test
             retain: true
             payload: "1"
+        - type: delay
+          duration: 1
     - type: sequence
       id: b
       steps:

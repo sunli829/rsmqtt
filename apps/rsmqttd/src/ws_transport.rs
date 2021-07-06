@@ -95,8 +95,8 @@ pub fn handler(
                     reader,
                     SinkWriter(sink),
                     RemoteAddr {
-                        protocol: "tcp",
-                        addr: Some(addr.clone()),
+                        protocol: "ws".into(),
+                        addr: Some(addr.clone().into()),
                     },
                 )
                 .await;

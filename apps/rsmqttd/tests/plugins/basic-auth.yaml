@@ -1,0 +1,40 @@
+plugins:
+  - type: basic-auth
+    users:
+      sunli: $pbkdf2-sha512$i=10000,l=32$V9dNu168tQCjFG1uOyIeeQ$wWhxjmLwaVoeUzreotGPOrE34eakNn5lpk8Glr8S4mw
+step:
+  type: sequence
+  id: a
+  steps:
+    - type: connect
+    - type: send
+      packet:
+        type: connect
+        level: V5
+        clean_start: true
+        login:
+          username: sunli
+          password: abcdef
+    - type: recv
+      packet:
+        type: connack
+        session_present: false
+        reason_code: Success
+        properties:
+          server_keep_alive: 30
+          session_expiry_interval: 60
+          topic_alias_max: 32
+    - type: disconnect
+    - type: connect
+    - type: send
+      packet:
+        type: connect
+        level: V5
+        clean_start: true
+        login:
+          username: sunli
+          password: abcdef1
+    - type: recv
+      packet:
+        type: disconnect
+        reason_code: NotAuthorized

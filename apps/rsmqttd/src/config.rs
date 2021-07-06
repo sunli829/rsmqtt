@@ -11,9 +11,6 @@ pub struct Config {
     pub service: ServiceConfig,
 
     #[serde(default)]
-    pub storage: Value,
-
-    #[serde(default)]
     pub plugins: Vec<Value>,
 }
 

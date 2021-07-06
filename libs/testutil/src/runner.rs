@@ -1,12 +1,14 @@
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytestring::ByteString;
 use codec::{Codec, Packet};
 use futures_util::future::BoxFuture;
+use serde_yaml::Value;
+use service::plugin::Plugin;
 use service::{client_loop, RemoteAddr, ServiceState};
-use storage_memory::MemoryStorage;
 use tokio::io::{DuplexStream, ReadHalf, WriteHalf};
 use tokio::sync::Mutex;
 
@@ -17,10 +19,13 @@ struct RunnerContext {
     clients: HashMap<ByteString, Codec<ReadHalf<DuplexStream>, WriteHalf<DuplexStream>>>,
 }
 
-pub async fn run(suite: Suite) {
-    let state = ServiceState::try_new(suite.config, Box::new(MemoryStorage::default()), Vec::new())
-        .await
-        .unwrap();
+pub async fn run<T, F>(suite: Suite, create_plugins: T)
+where
+    T: FnOnce(Vec<Value>) -> F,
+    F: Future<Output = Vec<(&'static str, Arc<dyn Plugin>)>>,
+{
+    let plugins = create_plugins(suite.plugins).await;
+    let state = ServiceState::new(suite.config, plugins);
     let ctx = Arc::new(Mutex::new(RunnerContext {
         state,
         clients: HashMap::new(),
@@ -38,7 +43,7 @@ fn execute_step(
 ) -> BoxFuture<'static, ()> {
     let fut = async move {
         match step {
-            Step::Connect => {
+            Step::Connect { remote_addr } => {
                 let id = id.expect("expect id");
                 println!("[CONNECT] id={}", id);
                 let mut ctx = ctx.lock().await;
@@ -46,14 +51,15 @@ fn execute_step(
                 let (server_reader, server_writer) = tokio::io::split(server);
                 let (client_reader, client_writer) = tokio::io::split(client);
                 let codec = Codec::new(client_reader, client_writer);
+                let remote_addr = remote_addr.unwrap_or_else(|| RemoteAddr {
+                    protocol: "memory".into(),
+                    addr: Some(format!("{}", id).into()),
+                });
                 tokio::spawn(client_loop(
                     ctx.state.clone(),
                     server_reader,
                     server_writer,
-                    RemoteAddr {
-                        protocol: "memory",
-                        addr: Some(format!("{}", id)),
-                    },
+                    remote_addr,
                 ));
                 assert!(
                     ctx.clients.insert(id.clone(), codec).is_none(),

@@ -22,7 +22,6 @@
     - [X] Shared Subscriptions
     - [X] Websocket transport
     - [X] $SYS topics
-    - [ ] Authentication exchange
     - [ ] Telemetry
 - Plugins
   - [X] basic-auth
@@ -33,10 +32,6 @@
 - API
   - [ ] Rest API
   - [ ] GraphQL API
-- Storage
-    - [X] Memory
-    - [ ] Rocksdb
-- [ ] ACL
 - Rule engine
     - [ ] Lua
     - [ ] WASM

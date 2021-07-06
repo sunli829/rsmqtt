@@ -3,8 +3,9 @@ use std::time::{Duration, SystemTime};
 use bytes::Bytes;
 use bytestring::ByteString;
 use codec::{LastWill, Publish, PublishProperties, Qos};
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     publisher: Option<ByteString>,
     created_at: SystemTime,
@@ -109,18 +110,18 @@ impl Message {
     }
 
     #[inline]
-    pub fn from_publish(publisher: Option<ByteString>, publish: Publish) -> Self {
+    pub fn from_publish(publisher: Option<ByteString>, publish: &Publish) -> Self {
         let properties = PublishProperties {
             payload_format_indicator: publish.properties.payload_format_indicator,
             message_expiry_interval: publish.properties.message_expiry_interval,
-            response_topic: publish.properties.response_topic,
-            correlation_data: publish.properties.correlation_data,
-            user_properties: publish.properties.user_properties,
-            content_type: publish.properties.content_type,
+            response_topic: publish.properties.response_topic.clone(),
+            correlation_data: publish.properties.correlation_data.clone(),
+            user_properties: publish.properties.user_properties.clone(),
+            content_type: publish.properties.content_type.clone(),
             ..PublishProperties::default()
         };
 
-        let mut msg = Self::new(publish.topic, publish.qos, publish.payload)
+        let mut msg = Self::new(publish.topic.clone(), publish.qos, publish.payload.clone())
             .with_retain(publish.retain)
             .with_properties(properties);
         msg.publisher = publisher;

@@ -25,6 +25,13 @@ pub enum UnsubAckReasonCode {
     PacketIdentifierInUse = 0x91,
 }
 
+impl UnsubAckReasonCode {
+    #[inline]
+    pub fn is_success(&self) -> bool {
+        Into::<u8>::into(*self) < 0x80
+    }
+}
+
 #[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct UnsubAckProperties {
     pub reason_string: Option<ByteString>,

@@ -20,6 +20,13 @@ pub enum PubCompReasonCode {
     PacketIdentifierNotFound = 146,
 }
 
+impl PubCompReasonCode {
+    #[inline]
+    pub fn is_success(&self) -> bool {
+        Into::<u8>::into(*self) < 0x80
+    }
+}
+
 #[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct PubCompProperties {
     pub reason_string: Option<ByteString>,

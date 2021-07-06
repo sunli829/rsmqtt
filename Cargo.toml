@@ -5,8 +5,6 @@ members = [
     "libs/testutil",
     "libs/passwd_util",
 
-    "libs/storages/memory",
-
     "libs/plugins/basic-auth",
     "libs/plugins/oso-acl",
 

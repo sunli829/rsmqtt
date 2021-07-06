@@ -7,7 +7,6 @@ edition = "2018"
 service = { path = "../../service", package = "rsmqtt-service" }
 passwd_util = { path = "../../passwd_util", package = "rsmqtt-passwd-util" }
 
-anyhow = "1.0.41"
 serde_yaml = "0.8.17"
 serde = { version = "1.0.126", features = ["derive"] }
 async-trait = "0.1.50"

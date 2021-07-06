@@ -19,7 +19,7 @@ macro_rules! prop_len {
 macro_rules! prop_remaining_length_len {
     ($value:expr) => {
         if let Some(value) = $value {
-            1 + $crate::writer::bytes_remaining_length(value)?
+            1 + $crate::writer::bytes_remaining_length(value.into())?
         } else {
             0
         }

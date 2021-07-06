@@ -55,12 +55,12 @@ impl Display for Load {
 
 #[derive(Default)]
 struct LastState {
-    last_values: HashMap<ByteString, ByteString>,
-    new_values: HashMap<ByteString, ByteString>,
+    last_values: HashMap<String, ByteString>,
+    new_values: HashMap<String, ByteString>,
 }
 
 impl LastState {
-    fn update(&mut self, topic: impl Into<ByteString>, value: impl ToString) {
+    fn update(&mut self, topic: impl Into<String>, value: impl ToString) {
         let topic = topic.into();
         let value: ByteString = value.to_string().into();
         if self.last_values.get(&topic) == Some(&value) {
@@ -120,7 +120,7 @@ pub async fn sys_topics_update_loop(state: Arc<ServiceState>) {
         tokio::time::sleep(Duration::from_secs(state.config.sys_update_interval)).await;
 
         let metrics = state.metrics.get();
-        let storage_metrics = match state.storage.metrics().await {
+        let storage_metrics = match state.storage.metrics() {
             Ok(storage_metrics) => storage_metrics,
             Err(err) => {
                 tracing::error!(
@@ -326,7 +326,7 @@ pub async fn sys_topics_update_loop(state: Arc<ServiceState>) {
                 .with_retain(true),
             );
         }
-        state.storage.publish(msgs).await.ok();
+        state.storage.publish(msgs).ok();
         last_state.merge();
 
         // publish to watch
