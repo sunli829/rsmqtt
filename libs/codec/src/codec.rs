@@ -1,5 +1,5 @@
 use bytes::BytesMut;
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ErrorKind};
 
 use crate::{DecodeError, EncodeError, Level, Packet};
 
@@ -39,17 +39,23 @@ where
     }
 
     pub async fn decode(&mut self) -> Result<Option<(Packet, usize)>, DecodeError> {
-        let res = Packet::decode(
-            &mut self.reader,
-            &mut self.read_buf,
-            self.level,
-            self.input_max_size,
-        )
-        .await?;
-        if let Some((Packet::Connect(connect), _)) = &res {
+        let flag = match self.reader.read_u8().await {
+            Ok(flag) => flag,
+            Err(err) if err.kind() == ErrorKind::UnexpectedEof => return Ok(None),
+            Err(err) => return Err(err.into()),
+        };
+        let (len, packet_size) = read_remaining_length(&mut self.reader).await?;
+        if len > self.input_max_size {
+            return Err(DecodeError::PacketTooLarge);
+        }
+        self.read_buf.resize(len, 0);
+        self.reader.read_exact(&mut self.read_buf[..]).await?;
+
+        let packet = Packet::decode(self.read_buf.split().freeze(), flag, self.level)?;
+        if let Packet::Connect(connect) = &packet {
             self.level = connect.level;
         }
-        Ok(res)
+        Ok(Some((packet, packet_size)))
     }
 
     pub async fn encode(&mut self, packet: &Packet) -> Result<usize, EncodeError> {
@@ -62,4 +68,27 @@ where
         self.write_buf.clear();
         Ok(size)
     }
+}
+
+#[inline]
+async fn read_remaining_length(
+    mut reader: impl AsyncRead + Unpin,
+) -> Result<(usize, usize), DecodeError> {
+    let mut n = 0;
+    let mut shift = 0;
+    let mut bytes = 0;
+
+    loop {
+        let byte = reader.read_u8().await?;
+        bytes += 1;
+        n += ((byte & 0x7f) as usize) << shift;
+        let done = (byte & 0x80) == 0;
+        if done {
+            break;
+        }
+        shift += 7;
+        ensure!(shift <= 21, DecodeError::MalformedPacket);
+    }
+
+    Ok((n, bytes))
 }

@@ -25,7 +25,7 @@ where
     F: Future<Output = Vec<(&'static str, Arc<dyn Plugin>)>>,
 {
     let plugins = create_plugins(suite.plugins).await;
-    let state = ServiceState::new(suite.config, plugins);
+    let state = ServiceState::new(suite.config, plugins).unwrap();
     let ctx = Arc::new(Mutex::new(RunnerContext {
         state,
         clients: HashMap::new(),

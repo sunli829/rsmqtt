@@ -4,6 +4,10 @@ version = "0.3.0"
 edition = "2018"
 license = "GPL-3.0"
 
+[[bench]]
+name = "codec"
+harness = false
+
 [dependencies]
 async-trait = "0.1.50"
 bytes = { version = "1.0.1", features = ["serde"] }
@@ -13,3 +17,7 @@ serde = { version = "1.0.126", features = ["derive"] }
 thiserror = "1.0.25"
 tokio = { version = "1.8.0", features = ["io-util", "macros"] }
 tokio-stream = "0.1.6"
+
+[dev-dependencies]
+criterion = { version = "0.3.4", features = ["html_reports"] }
+

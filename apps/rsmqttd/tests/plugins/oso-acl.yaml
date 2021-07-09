@@ -5,11 +5,9 @@ plugins:
       sunli2: $pbkdf2-sha512$i=10000,l=32$V9dNu168tQCjFG1uOyIeeQ$wWhxjmLwaVoeUzreotGPOrE34eakNn5lpk8Glr8S4mw
   - type: oso-acl
     rules: |
-      allow(conn: Connection, "pub", "test") if conn.uid = "sunli";
-
-      allow(conn: Connection, action: String, "test") if conn.addr == "1.1.1.1";
-
-      allow(conn: Connection, action: String, topic: String) if new Filter("a/+/c").test(topic);
+      allow(conn: Connection, "pub", topic: Filter) if conn.uid = "sunli";
+      allow(conn: Connection, action: String, topic: Filter) if conn.addr == "1.1.1.1";
+      allow(conn: Connection, action: String, topic: Filter) if new Filter("a/+/c").check(topic);
 step:
   type: sequence
   id: a

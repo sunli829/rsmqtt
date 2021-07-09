@@ -10,7 +10,7 @@ anyhow = "1.0.41"
 serde_yaml = "0.8.17"
 tokio = { version = "1.8.0", features = ["sync", "rt-multi-thread", "time", "macros", "net", "io-util"] }
 tracing = "0.1.26"
-tokio-stream = "0.1.6"
+tokio-stream = { version = "0.1.7", features = ["sync"] }
 bytestring = "1.0.0"
 serde = { version = "1.0.126", features = ["derive"] }
 fnv = "1.0.7"
@@ -22,3 +22,4 @@ thiserror = "1.0.25"
 version = "3.0.0"
 parking_lot = "0.11.1"
 fastrand = "1.4.1"
+regex = "1.5.4"

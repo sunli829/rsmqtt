@@ -9,7 +9,7 @@ use oso::{Oso, PolarClass};
 use serde::Deserialize;
 use serde_yaml::Value;
 use service::plugin::{Action, Plugin, PluginFactory, PluginResult};
-use service::RemoteAddr;
+use service::{RemoteAddr, TopicFilter};
 
 #[derive(Debug, Deserialize)]
 struct Config {
@@ -50,7 +50,7 @@ impl PluginFactory for OsoAcl {
         oso.register_class(
             types::Filter::get_polar_class_builder()
                 .set_constructor(types::Filter::new)
-                .add_method("test", types::Filter::test)
+                .add_method("check", types::Filter::check)
                 .build(),
         )?;
 
@@ -83,7 +83,7 @@ impl Plugin for OsoAclImpl {
                 Action::Publish => "pub",
                 Action::Subscribe => "sub",
             },
-            topic,
+            types::Filter(TopicFilter::try_new(topic)),
         )?)
     }
 }

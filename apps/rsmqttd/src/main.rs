@@ -7,6 +7,7 @@ mod server;
 mod ws_transport;
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use service::ServiceState;
@@ -62,9 +63,18 @@ async fn run() -> Result<()> {
     };
 
     let plugins = create_plugins(config.plugins).await?;
-    let state = ServiceState::new(config.service, plugins);
+    let state = ServiceState::new(config.service, plugins)?;
 
-    tokio::spawn(service::sys_topics_update_loop(state.clone()));
+    tokio::spawn({
+        let state = state.clone();
+        async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(state.config.metrics_update_interval)).await;
+                state.update_metrics().await;
+                state.update_sys_topics();
+            }
+        }
+    });
     server::run(state, config.network).await
 }
 

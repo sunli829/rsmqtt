@@ -1,10 +1,16 @@
-use codec::Qos;
+use codec::{Qos, SubscribeFilter};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
+pub struct RewriteConfig {
+    pub pattern: String,
+    pub write: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct ServiceConfig {
-    #[serde(default = "default_sys_update_interval")]
-    pub sys_update_interval: u64,
+    #[serde(default = "default_metrics_update_interval")]
+    pub metrics_update_interval: u64,
     #[serde(default = "default_max_keep_alive")]
     pub max_keep_alive: u16,
     #[serde(default = "default_max_session_expiry_interval")]
@@ -21,6 +27,14 @@ pub struct ServiceConfig {
     pub retain_available: bool,
     #[serde(default = "default_wildcard_subscription_available")]
     pub wildcard_subscription_available: bool,
+    #[serde(default)]
+    pub subscriptions: Vec<SubscribeFilter>,
+    #[serde(default)]
+    pub rewrites: Vec<RewriteConfig>,
+}
+
+fn default_metrics_update_interval() -> u64 {
+    5
 }
 
 fn default_max_keep_alive() -> u16 {
@@ -58,7 +72,7 @@ fn default_wildcard_subscription_available() -> bool {
 impl Default for ServiceConfig {
     fn default() -> Self {
         Self {
-            sys_update_interval: 5,
+            metrics_update_interval: 5,
             max_keep_alive: default_max_keep_alive(),
             max_session_expiry_interval: default_max_session_expiry_interval(),
             receive_max: default_receive_max(),
@@ -67,10 +81,8 @@ impl Default for ServiceConfig {
             maximum_qos: default_max_qos(),
             retain_available: default_retain_available(),
             wildcard_subscription_available: default_wildcard_subscription_available(),
+            subscriptions: Vec::new(),
+            rewrites: Vec::new(),
         }
     }
-}
-
-fn default_sys_update_interval() -> u64 {
-    5
 }

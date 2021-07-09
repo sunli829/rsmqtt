@@ -1,11 +1,4 @@
-use std::collections::HashMap;
-use std::num::NonZeroUsize;
-
 use bytestring::ByteString;
-use codec::{Qos, RetainHandling};
-use serde::{Deserialize, Serialize};
-
-use crate::Message;
 
 #[inline]
 pub fn valid_topic(topic: &str) -> bool {
@@ -15,14 +8,14 @@ pub fn valid_topic(topic: &str) -> bool {
     !topic.contains(&['+', '#'][..])
 }
 
-#[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
+#[derive(Debug, Eq, PartialEq, Clone)]
 enum Segment {
     Name(ByteString),
     NumberSign,
     PlusSign,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct TopicFilter {
     path: ByteString,
     has_wildcards: bool,
@@ -123,108 +116,38 @@ impl TopicFilter {
 
         true
     }
-}
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FilterItem {
-    pub topic_filter: TopicFilter,
-    pub qos: Qos,
-    pub no_local: bool,
-    pub retain_as_published: bool,
-    pub retain_handling: RetainHandling,
-    pub id: Option<NonZeroUsize>,
-}
-
-#[derive(Debug, Default, Serialize, Deserialize)]
-pub struct Filters(HashMap<String, FilterItem>);
-
-impl Filters {
-    #[inline]
-    pub fn insert(&mut self, item: FilterItem) -> Option<FilterItem> {
-        self.0.insert(item.topic_filter.path.to_string(), item)
-    }
-
-    #[inline]
-    pub fn remove(&mut self, path: &str) -> Option<FilterItem> {
-        self.0.remove(path)
-    }
-
-    #[inline]
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    #[inline]
-    pub fn filter_message(&self, client_id: &str, msg: &Message) -> Option<Message> {
-        let mut matched = false;
-        let mut max_qos = Qos::AtMostOnce;
-        let mut retain = msg.is_retain();
-        let mut ids = Vec::new();
-
-        if msg.is_expired() {
-            return None;
+    pub fn is_overlapped(&self, other: &Self) -> bool {
+        for (left, right) in self.segments.iter().zip(other.segments.iter()) {
+            match (left, right) {
+                (Segment::Name(left_name), Segment::Name(right_name)) => {
+                    if left_name != right_name {
+                        return false;
+                    }
+                }
+                (Segment::PlusSign, Segment::Name(_))
+                | (Segment::Name(_), Segment::PlusSign)
+                | (Segment::PlusSign, Segment::PlusSign) => {
+                    return true;
+                }
+                (Segment::NumberSign, _) | (_, Segment::NumberSign) => {
+                    return true;
+                }
+            }
         }
-
-        for filter in self.0.values() {
-            if filter.no_local && msg.publisher().map(|s| &**s) == Some(client_id) {
-                // If no local is true, Application Messages MUST NOT be forwarded to a connection with
-                // a ClientID equal to the ClientID of the publishing connection [MQTT-3.8.3-3]
-                continue;
-            }
-
-            if !filter.topic_filter.matches(msg.topic()) {
-                continue;
-            }
-
-            if let Some(id) = filter.id {
-                // If the Client specified a Subscription Identifier for any of the overlapping
-                // subscriptions the Server MUST send those Subscription Identifiers in the message
-                // which is published as the result of the subscriptions [MQTT-3.3.4-3].
-                //
-                // If the Server sends a single copy of the message it MUST include in the PUBLISH packet
-                // the Subscription Identifiers for all matching subscriptions which have a Subscription Identifiers,
-                // their order is not significant [MQTT-3.3.4-4].
-                ids.push(id);
-            }
-
-            // When Clients make subscriptions with Topic Filters that include wildcards, it is possible
-            // for a Client’s subscriptions to overlap so that a published message might match multiple filters.
-            // In this case the Server MUST deliver the message to the Client respecting the maximum QoS of all
-            // the matching subscriptions [MQTT-3.3.4-2].
-            max_qos = max_qos.max(filter.qos);
-
-            if !filter.retain_as_published {
-                retain = false;
-            }
-
-            matched = true;
-        }
-
-        if matched {
-            let mut properties = msg.properties().clone();
-            properties.subscription_identifiers = ids;
-            let msg = Message::new(
-                msg.topic().clone(),
-                msg.qos().min(max_qos),
-                msg.payload().clone(),
-            )
-            .with_retain(retain)
-            .with_properties(properties);
-            Some(msg)
-        } else {
-            None
-        }
+        false
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    macro_rules! filter {
+        ($path:expr) => {
+            TopicFilter::try_new($path).unwrap()
+        };
+    }
 
     #[test]
     fn test_valid_topic() {
@@ -238,59 +161,86 @@ mod tests {
 
     #[test]
     fn test_new() {
-        let filter = TopicFilter::try_new("sport/tennis/player1/#").unwrap();
+        let filter = filter!("sport/tennis/player1/#");
         assert!(filter.has_wildcards());
 
-        let filter = TopicFilter::try_new("sport/tennis/+").unwrap();
+        let filter = filter!("sport/tennis/+");
         assert!(filter.has_wildcards());
 
-        let filter = TopicFilter::try_new("sport/tennis/+/#").unwrap();
+        let filter = filter!("sport/tennis/+/#");
         assert!(filter.has_wildcards());
 
         assert!(TopicFilter::try_new("sport/#/player1").is_none());
 
-        let filter = TopicFilter::try_new("$SYS/#").unwrap();
+        let filter = filter!("$SYS/#");
         assert!(filter.has_wildcards());
 
-        let filter = TopicFilter::try_new("$SYS/tennis/player1").unwrap();
+        let filter = filter!("$SYS/tennis/player1");
         assert!(!filter.has_wildcards());
 
-        let filter = TopicFilter::try_new("$share/share1/tennis/player1").unwrap();
+        let filter = filter!("$share/share1/tennis/player1");
         assert!(!filter.has_wildcards());
         assert_eq!(filter.share_name(), Some("share1"));
     }
 
     #[test]
     fn test_matches() {
-        let filter = TopicFilter::try_new("sport/tennis/player1/#").unwrap();
+        let filter = filter!("sport/tennis/player1/#");
         assert!(filter.matches("sport/tennis/player1"));
         assert!(filter.matches("sport/tennis/player1/ranking"));
         assert!(filter.matches("sport/tennis/player1/score/wimbledon"));
 
-        let filter = TopicFilter::try_new("sport/tennis/+").unwrap();
+        let filter = filter!("sport/tennis/+");
         assert!(filter.matches("sport/tennis/player1"));
         assert!(filter.matches("sport/tennis/player2"));
         assert!(!filter.matches("sport/tennis/player1/ranking"));
 
-        let filter = TopicFilter::try_new("$share/share1/sport/tennis/+").unwrap();
+        let filter = filter!("$share/share1/sport/tennis/+");
         assert!(filter.matches("sport/tennis/player1"));
         assert!(filter.matches("sport/tennis/player2"));
         assert!(!filter.matches("sport/tennis/player1/ranking"));
 
-        let filter = TopicFilter::try_new("sport/+").unwrap();
+        let filter = filter!("sport/+");
         assert!(!filter.matches("sport"));
         assert!(filter.matches("sport/"));
 
-        let filter = TopicFilter::try_new("+/monitor/Clients").unwrap();
+        let filter = filter!("+/monitor/Clients");
         assert!(!filter.matches("$SYS/monitor/Clients"));
 
-        let filter = TopicFilter::try_new("$SYS/#").unwrap();
+        let filter = filter!("$SYS/#");
         assert!(filter.matches("$SYS/monitor/Clients"));
 
-        let filter = TopicFilter::try_new("$SYS/monitor/+").unwrap();
+        let filter = filter!("$SYS/monitor/+");
         assert!(filter.matches("$SYS/monitor/Clients"));
 
-        let filter = TopicFilter::try_new("#").unwrap();
+        let filter = filter!("#");
         assert!(!filter.matches("$SYS/monitor/Clients"));
+    }
+
+    #[test]
+    fn test_is_overlapped() {
+        assert!(filter!("a/b").is_overlapped(&filter!("a/+")));
+        assert!(!filter!("a").is_overlapped(&filter!("a/+")));
+        assert!(filter!("a/+").is_overlapped(&filter!("a/b")));
+
+        assert!(filter!("a/b/c").is_overlapped(&filter!("a/+/c")));
+        assert!(filter!("a/+/c").is_overlapped(&filter!("a/b/c")));
+        assert!(!filter!("a/b/c/+").is_overlapped(&filter!("a/b/c")));
+        assert!(!filter!("a/b/c").is_overlapped(&filter!("a/b/c/+")));
+
+        assert!(filter!("a/#").is_overlapped(&filter!("a/b")));
+        assert!(filter!("a/#").is_overlapped(&filter!("a/b")));
+        assert!(filter!("a/b").is_overlapped(&filter!("a/#")));
+        assert!(filter!("a/b/#").is_overlapped(&filter!("a/b/c")));
+        assert!(!filter!("a/b/#").is_overlapped(&filter!("a/b")));
+
+        assert!(filter!("a/b/#").is_overlapped(&filter!("a/b/+/d")));
+
+        assert!(filter!("#").is_overlapped(&filter!("a/b")));
+        assert!(filter!("#").is_overlapped(&filter!("#")));
+
+        assert!(filter!("#").is_overlapped(&filter!("#")));
+        assert!(filter!("#").is_overlapped(&filter!("a/#")));
+        assert!(!filter!("a/b/c/#").is_overlapped(&filter!("a/b/d/#")));
     }
 }

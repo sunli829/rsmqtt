@@ -130,7 +130,7 @@ async fn run_http_server(state: Arc<ServiceState>, http_config: HttpConfig) -> R
         tracing::info!("api enabled");
 
         let api = warp::path!("api" / "v1" / ..)
-            .and(crate::api::stat(state.clone()))
+            .and(crate::api::metrics(state.clone()))
             .boxed();
         routes = routes.or(api).unify().boxed();
     }

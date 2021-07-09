@@ -1,6 +1,5 @@
-use bytes::{BufMut, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncRead, AsyncReadExt, ErrorKind};
 
 use crate::{
     ConnAck, Connect, DecodeError, Disconnect, EncodeError, Level, PubAck, PubComp, PubRec, PubRel,
@@ -44,54 +43,29 @@ pub enum Packet {
 }
 
 impl Packet {
-    pub(crate) async fn decode(
-        mut reader: impl AsyncRead + Unpin,
-        data: &mut BytesMut,
-        level: Level,
-        max_size: usize,
-    ) -> Result<Option<(Self, usize)>, DecodeError> {
-        let flag = match reader.read_u8().await {
-            Ok(flag) => flag,
-            Err(err) if err.kind() == ErrorKind::UnexpectedEof => return Ok(None),
-            Err(err) => return Err(err.into()),
-        };
-        let mut packet_size = 1;
-        let (len, bytes_len) = read_remaining_length(&mut reader).await?;
-        ensure!(len <= max_size, DecodeError::PacketTooLarge);
-
-        packet_size += bytes_len;
-
-        data.resize(len, 0);
-        reader
-            .read_exact(&mut *data)
-            .await
-            .map_err(|_| DecodeError::MalformedPacket)?;
-        packet_size += data.len();
-
+    pub fn decode(data: Bytes, flag: u8, level: Level) -> Result<Self, DecodeError> {
         let packet = match (flag & 0xf0) >> 4 {
             RESERVED => return Err(DecodeError::ReservedPacketType),
-            CONNECT => Self::Connect(Connect::decode(data.split().freeze(), level)?),
-            CONNACK => Self::ConnAck(ConnAck::decode(data.split().freeze(), level)?),
-            PUBLISH => Self::Publish(Publish::decode(data.split().freeze(), level, flag)?),
-            PUBACK => Self::PubAck(PubAck::decode(data.split().freeze(), level)?),
-            PUBREC => Self::PubRec(PubRec::decode(data.split().freeze(), level)?),
-            PUBREL => Self::PubRel(PubRel::decode(data.split().freeze(), level, flag)?),
-            PUBCOMP => Self::PubComp(PubComp::decode(data.split().freeze(), level)?),
-            SUBSCRIBE => Self::Subscribe(Subscribe::decode(data.split().freeze(), level, flag)?),
-            SUBACK => Self::SubAck(SubAck::decode(data.split().freeze(), level)?),
-            UNSUBSCRIBE => {
-                Self::Unsubscribe(Unsubscribe::decode(data.split().freeze(), level, flag)?)
-            }
-            UNSUBACK => Self::UnsubAck(UnsubAck::decode(data.split().freeze(), level)?),
+            CONNECT => Self::Connect(Connect::decode(data, level)?),
+            CONNACK => Self::ConnAck(ConnAck::decode(data, level)?),
+            PUBLISH => Self::Publish(Publish::decode(data, level, flag)?),
+            PUBACK => Self::PubAck(PubAck::decode(data, level)?),
+            PUBREC => Self::PubRec(PubRec::decode(data, level)?),
+            PUBREL => Self::PubRel(PubRel::decode(data, level, flag)?),
+            PUBCOMP => Self::PubComp(PubComp::decode(data, level)?),
+            SUBSCRIBE => Self::Subscribe(Subscribe::decode(data, level, flag)?),
+            SUBACK => Self::SubAck(SubAck::decode(data, level)?),
+            UNSUBSCRIBE => Self::Unsubscribe(Unsubscribe::decode(data, level, flag)?),
+            UNSUBACK => Self::UnsubAck(UnsubAck::decode(data, level)?),
             PINGREQ => Self::PingReq,
             PINGRESP => Self::PingResp,
-            DISCONNECT => Self::Disconnect(Disconnect::decode(data.split().freeze(), level)?),
+            DISCONNECT => Self::Disconnect(Disconnect::decode(data, level)?),
             n => return Err(DecodeError::UnknownPacketType(n)),
         };
-        Ok(Some((packet, packet_size)))
+        Ok(packet)
     }
 
-    pub(crate) fn encode(
+    pub fn encode(
         &self,
         data: &mut BytesMut,
         level: Level,
@@ -120,26 +94,4 @@ impl Packet {
             Packet::Disconnect(disconnect) => disconnect.encode(data, level, max_size),
         }
     }
-}
-
-async fn read_remaining_length(
-    mut reader: impl AsyncRead + Unpin,
-) -> Result<(usize, usize), DecodeError> {
-    let mut n = 0;
-    let mut shift = 0;
-    let mut bytes = 0;
-
-    loop {
-        let byte = reader.read_u8().await?;
-        bytes += 1;
-        n += ((byte & 0x7f) as usize) << shift;
-        let done = (byte & 0x80) == 0;
-        if done {
-            break;
-        }
-        shift += 7;
-        ensure!(shift <= 21, DecodeError::MalformedPacket);
-    }
-
-    Ok((n, bytes))
 }

@@ -35,6 +35,7 @@ pub trait PacketReader {
 
     fn read_binary(&mut self) -> Result<Bytes, DecodeError>;
 
+    #[inline]
     fn read_bool(&mut self) -> Result<bool, DecodeError> {
         Ok(self.read_u8()? > 0)
     }
@@ -53,11 +54,13 @@ impl PacketReader for Bytes {
         Ok(self.get_u16())
     }
 
+    #[inline]
     fn read_u32(&mut self) -> Result<u32, DecodeError> {
         ensure!(self.remaining() >= 4, DecodeError::MalformedPacket);
         Ok(self.get_u32())
     }
 
+    #[inline]
     fn read_string(&mut self) -> Result<ByteString, DecodeError> {
         let len = self.read_u16()? as usize;
         ensure!(self.remaining() >= len, DecodeError::MalformedPacket);
@@ -66,6 +69,7 @@ impl PacketReader for Bytes {
             .map_err(|_| DecodeError::MalformedPacket)
     }
 
+    #[inline]
     fn read_binary(&mut self) -> Result<Bytes, DecodeError> {
         let len = self.read_u16()? as usize;
         ensure!(self.remaining() >= len, DecodeError::MalformedPacket);

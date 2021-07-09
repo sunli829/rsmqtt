@@ -21,10 +21,11 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, oneshot, Notify};
 
 use crate::error::Error;
-use crate::filter::{self, FilterItem, TopicFilter};
+use crate::filter::{self, TopicFilter};
 use crate::message::Message;
 use crate::plugin::Action;
 use crate::state::Control;
+use crate::storage::FilterItem;
 use crate::ServiceState;
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -97,10 +98,12 @@ where
         );
         match self.codec.encode(packet).await {
             Ok(packet_size) => {
-                self.state.metrics.inc_msgs_sent(1);
-                self.state.metrics.inc_bytes_sent(packet_size);
+                self.state.service_metrics.inc_msgs_sent(1);
+                self.state.service_metrics.inc_bytes_sent(packet_size);
                 if let Packet::Publish(publish) = packet {
-                    self.state.metrics.inc_pub_bytes_sent(publish.payload.len());
+                    self.state
+                        .service_metrics
+                        .inc_pub_bytes_sent(publish.payload.len());
                 }
                 Ok(())
             }
@@ -327,22 +330,13 @@ where
         }
 
         // create session
-        let (session_present, notify) = match self.state.storage.create_session(
+        let (session_present, notify) = self.state.storage.create_session(
             &connect.client_id,
             connect.clean_start,
             connect.last_will.clone(),
             session_expiry_interval,
             last_will_expiry_interval,
-        ) {
-            Ok(res) => res,
-            Err(err) => {
-                tracing::error!(
-                    error = %err,
-                    "failed to create session"
-                );
-                return Err(Error::internal_error(err));
-            }
-        };
+        );
 
         if session_present {
             if let Some(join_handle) = self
@@ -400,27 +394,42 @@ where
             properties: conn_ack_properties,
         }))
         .await?;
-        self.state.metrics.inc_connection_count(1);
+        self.state.service_metrics.inc_connection_count(1);
 
-        // retry send inflight publish
-        match self
-            .state
-            .storage
-            .get_all_inflight_pub_packets(&connect.client_id)
-        {
-            Ok(packets) => {
-                for mut publish in packets {
-                    publish.dup = true;
-                    self.receive_out_quota -= 1;
-                    self.send_packet(&Packet::Publish(publish)).await?;
-                }
+        if session_present {
+            // retry send inflight publish
+            let packets = self
+                .state
+                .storage
+                .get_all_inflight_pub_packets(&connect.client_id);
+            for mut publish in packets {
+                publish.dup = true;
+                self.receive_out_quota -= 1;
+                self.send_packet(&Packet::Publish(publish)).await?;
             }
-            Err(err) => {
-                tracing::error!(
-                    error = %err,
-                    "failed to take all inflight packets"
-                );
-                return Err(Error::internal_error(err));
+        } else {
+            for s in &self.state.config.subscriptions {
+                let topic_filter = match TopicFilter::try_new(&*s.path) {
+                    Some(topic_filter) => topic_filter,
+                    None => {
+                        tracing::warn!(
+                            filter = %s.path,
+                            "failed to parse proxy subscription filter",
+                        );
+                        continue;
+                    }
+                };
+
+                println!("***");
+                let item = FilterItem {
+                    topic_filter,
+                    qos: s.qos,
+                    no_local: s.no_local,
+                    retain_as_published: s.retain_as_published,
+                    retain_handling: s.retain_handling,
+                    id: None,
+                };
+                self.state.storage.subscribe(&connect.client_id, item);
             }
         }
 
@@ -438,9 +447,9 @@ where
         };
 
         self.state
-            .metrics
+            .service_metrics
             .inc_pub_bytes_received(publish.payload.len());
-        self.state.metrics.inc_pub_msgs_received(1);
+        self.state.service_metrics.inc_pub_msgs_received(1);
 
         if matches!(publish.properties.topic_alias, Some(client) if client.get() > self.state.config.max_topic_alias)
         {
@@ -517,46 +526,30 @@ where
         let retain = publish.retain;
         let packet_id = publish.packet_id;
 
+        // check acl
+        self.check_acl(Action::Publish, &publish.topic).await?;
+
+        // rewrite
+        self.state.rewrite(&mut publish.topic);
+
         // create message
         let msg = Message::from_publish(Some(client_id.clone()), &publish)
             .with_publisher(client_id.clone());
 
         if retain {
             // update retained message
-            if let Err(err) = self
-                .state
+            self.state
                 .storage
-                .update_retained_message(msg.topic(), msg.clone())
-            {
-                tracing::warn!(
-                    error = %err,
-                    "failed to update retained message",
-                );
-            }
+                .update_retained_message(msg.topic(), msg.clone());
         }
-
-        // check acl
-        self.check_acl(Action::Publish, &publish.topic).await?;
 
         // do publish
         match msg.qos() {
             Qos::AtMostOnce => {
-                if let Err(err) = self.state.storage.publish(vec![msg]) {
-                    tracing::error!(
-                        error = %err,
-                        "failed to publish message",
-                    );
-                    return Err(Error::internal_error(err));
-                }
+                self.state.storage.publish(std::iter::once(msg));
             }
             Qos::AtLeastOnce => {
-                if let Err(err) = self.state.storage.publish(vec![msg]) {
-                    tracing::error!(
-                        error = %err,
-                        "failed to publish message",
-                    );
-                    return Err(Error::internal_error(err));
-                }
+                self.state.storage.publish(std::iter::once(msg));
                 self.send_packet(&Packet::PubAck(PubAck {
                     packet_id: packet_id.unwrap(),
                     reason_code: PubAckReasonCode::Success,
@@ -566,41 +559,31 @@ where
             }
             Qos::ExactlyOnce => {
                 if self.receive_in_quota == 0 {
-                    self.state.metrics.inc_msg_dropped(1);
+                    self.state.service_metrics.inc_msg_dropped(1);
                     return Err(Error::server_disconnect(
                         DisconnectReasonCode::ReceiveMaximumExceeded,
                     ));
                 }
 
-                match self.state.storage.add_uncompleted_message(
+                if self.state.storage.add_uncompleted_message(
                     &client_id,
                     packet_id.unwrap(),
                     msg.clone(),
                 ) {
-                    Ok(true) => {
-                        self.receive_in_quota -= 1;
-                        self.send_packet(&Packet::PubRec(PubRec {
-                            packet_id: packet_id.unwrap(),
-                            reason_code: PubRecReasonCode::Success,
-                            properties: PubRecProperties::default(),
-                        }))
-                        .await?;
-                    }
-                    Ok(false) => {
-                        self.send_packet(&Packet::PubRec(PubRec {
-                            packet_id: packet_id.unwrap(),
-                            reason_code: PubRecReasonCode::PacketIdentifierInUse,
-                            properties: PubRecProperties::default(),
-                        }))
-                        .await?;
-                    }
-                    Err(err) => {
-                        tracing::error!(
-                            error = %err,
-                            "failed to save qos2 message",
-                        );
-                        return Err(Error::internal_error(err));
-                    }
+                    self.receive_in_quota -= 1;
+                    self.send_packet(&Packet::PubRec(PubRec {
+                        packet_id: packet_id.unwrap(),
+                        reason_code: PubRecReasonCode::Success,
+                        properties: PubRecProperties::default(),
+                    }))
+                    .await?;
+                } else {
+                    self.send_packet(&Packet::PubRec(PubRec {
+                        packet_id: packet_id.unwrap(),
+                        reason_code: PubRecReasonCode::PacketIdentifierInUse,
+                        properties: PubRecProperties::default(),
+                    }))
+                    .await?;
                 }
             }
         }
@@ -630,17 +613,13 @@ where
             .storage
             .get_inflight_pub_packets(client_id, pub_ack.packet_id, true)
         {
-            Ok(Some(_)) => {
+            Some(_) => {
                 self.receive_out_quota += 1;
                 Ok(())
             }
-            Ok(None) => Err(Error::server_disconnect(
+            None => Err(Error::server_disconnect(
                 DisconnectReasonCode::ProtocolError,
             )),
-            Err(err) => {
-                tracing::error!(error = %err, "failed to get inflight packet");
-                Err(Error::internal_error(err))
-            }
         }
     }
 
@@ -669,21 +648,15 @@ where
         }
 
         if !pub_rec.reason_code.is_success() {
-            match self
+            if self
                 .state
                 .storage
                 .get_inflight_pub_packets(client_id, pub_rec.packet_id, true)
+                .is_none()
             {
-                Ok(Some(_)) => {}
-                Ok(None) => {
-                    return Err(Error::server_disconnect(
-                        DisconnectReasonCode::ProtocolError,
-                    ))
-                }
-                Err(err) => {
-                    tracing::error!(error = %err, "failed to get inflight packet");
-                    return Err(Error::internal_error(err));
-                }
+                return Err(Error::server_disconnect(
+                    DisconnectReasonCode::ProtocolError,
+                ));
             }
             return Ok(());
         }
@@ -693,7 +666,7 @@ where
             .storage
             .get_inflight_pub_packets(client_id, pub_rec.packet_id, false)
         {
-            Ok(Some(_)) => {
+            Some(_) => {
                 self.send_packet(&Packet::PubRel(PubRel {
                     packet_id: pub_rec.packet_id,
                     reason_code: PubRelReasonCode::Success,
@@ -702,13 +675,9 @@ where
                 .await?;
                 Ok(())
             }
-            Ok(None) => Err(Error::server_disconnect(
+            None => Err(Error::server_disconnect(
                 DisconnectReasonCode::ProtocolError,
             )),
-            Err(err) => {
-                tracing::error!(error = %err, "failed to get inflight packet");
-                Err(Error::internal_error(err))
-            }
         }
     }
 
@@ -727,15 +696,8 @@ where
             .storage
             .remove_uncompleted_message(client_id, pub_rel.packet_id)
         {
-            Ok(Some(msg)) => {
-                if let Err(err) = self.state.storage.publish(vec![msg]) {
-                    tracing::error!(
-                        error = %err,
-                        "failed to publish message",
-                    );
-                    return Err(Error::internal_error(err));
-                }
-
+            Some(msg) => {
+                self.state.storage.publish(std::iter::once(msg));
                 self.send_packet(&Packet::PubComp(PubComp {
                     packet_id: pub_rel.packet_id,
                     reason_code: match pub_rel.reason_code {
@@ -750,20 +712,13 @@ where
 
                 self.receive_in_quota += 1;
             }
-            Ok(None) => {
+            None => {
                 self.send_packet(&Packet::PubComp(PubComp {
                     packet_id: pub_rel.packet_id,
                     reason_code: PubCompReasonCode::PacketIdentifierNotFound,
                     properties: PubCompProperties::default(),
                 }))
                 .await?;
-            }
-            Err(err) => {
-                tracing::error!(
-                    error = %err,
-                    "failed to get uncompleted message",
-                );
-                return Err(Error::internal_error(err));
             }
         }
 
@@ -795,7 +750,7 @@ where
             .storage
             .get_inflight_pub_packets(client_id, pub_comp.packet_id, true)
         {
-            Ok(Some(_)) => {
+            Some(_) => {
                 tracing::debug!(
                     remote_addr = %self.remote_addr,
                     client_id = %client_id,
@@ -805,20 +760,13 @@ where
                 self.receive_out_quota += 1;
                 self.handle_notified().await?;
             }
-            Ok(None) => {
+            None => {
                 tracing::debug!(
                     remote_addr = %self.remote_addr,
                     client_id = %client_id,
                     packet_id = pub_comp.packet_id,
                     "inflight packet not found",
                 );
-            }
-            Err(err) => {
-                tracing::error!(
-                    error = %err,
-                    "failed to get inflight packet",
-                );
-                return Err(Error::internal_error(err));
             }
         }
 
@@ -877,14 +825,7 @@ where
                 retain_handling: filter.retain_handling,
                 id: subscribe.properties.id,
             };
-            if let Err(err) = self.state.storage.subscribe(&client_id, filter_item) {
-                tracing::error!(
-                    error = %err,
-                    "failed to subscribe topic",
-                );
-                reason_codes.push(SubscribeReasonCode::Unspecified);
-                continue;
-            };
+            self.state.storage.subscribe(&client_id, filter_item);
         }
 
         self.send_packet(&Packet::SubAck(SubAck {
@@ -918,15 +859,8 @@ where
             };
 
             match self.state.storage.unsubscribe(client_id, topic_filter) {
-                Ok(true) => reason_codes.push(UnsubAckReasonCode::Success),
-                Ok(false) => reason_codes.push(UnsubAckReasonCode::NoSubscriptionExisted),
-                Err(err) => {
-                    tracing::error!(
-                        error = %err,
-                        "failed to unsubscribe",
-                    );
-                    return Err(Error::internal_error(err));
-                }
+                true => reason_codes.push(UnsubAckReasonCode::Success),
+                false => reason_codes.push(UnsubAckReasonCode::NoSubscriptionExisted),
             }
         }
 
@@ -960,7 +894,7 @@ where
             Control::SessionTakenOver(reply) => {
                 if let Some(client_id) = self.client_id.take() {
                     self.state.connections.write().await.remove(&*client_id);
-                    self.state.metrics.dec_connection_count(1);
+                    self.state.service_metrics.dec_connection_count(1);
                 }
                 reply.send(()).ok();
                 Err(Error::SessionTakenOver)
@@ -974,21 +908,10 @@ where
                 return Ok(());
             }
 
-            let msgs = match self
+            let msgs = self
                 .state
                 .storage
-                .next_messages(&client_id, Some(self.receive_out_quota))
-            {
-                Ok(msgs) => msgs,
-                Err(err) => {
-                    tracing::warn!(
-                        client_id = %client_id,
-                        error = %err,
-                        "failed to pull next messages",
-                    );
-                    Vec::new()
-                }
-            };
+                .next_messages(&client_id, Some(self.receive_out_quota));
             assert!(msgs.len() <= self.receive_out_quota);
 
             let mut publish_err = None;
@@ -1016,17 +939,9 @@ where
             }
 
             if consume_count > 0 {
-                if let Err(err) = self
-                    .state
+                self.state
                     .storage
-                    .consume_messages(&client_id, consume_count)
-                {
-                    tracing::error!(
-                        error = %err,
-                        "failed to consume messages",
-                    );
-                    return Err(Error::internal_error(err));
-                }
+                    .consume_messages(&client_id, consume_count);
             }
         }
 
@@ -1044,7 +959,7 @@ where
             None => return Ok(()),
         };
 
-        self.state.metrics.inc_pub_msgs_sent(1);
+        self.state.service_metrics.inc_pub_msgs_sent(1);
         match publish.qos {
             Qos::AtMostOnce => self.send_packet(&Packet::Publish(publish)).await,
             Qos::AtLeastOnce | Qos::ExactlyOnce => {
@@ -1061,19 +976,9 @@ where
                     packet_id = packet_id,
                     "add inflight packet",
                 );
-                if let Err(err) = self
-                    .state
+                self.state
                     .storage
-                    .add_inflight_pub_packet(&client_id, publish.clone())
-                {
-                    tracing::error!(
-                        error = %err,
-                        "failed to add inflight packet",
-                    );
-                    return Err(Error::server_disconnect(
-                        DisconnectReasonCode::ProtocolError,
-                    ));
-                }
+                    .add_inflight_pub_packet(&client_id, publish.clone());
                 self.inflight_qos2_messages
                     .insert(packet_id, Qos2State::Published);
                 self.send_packet(&Packet::Publish(publish)).await?;
@@ -1089,7 +994,7 @@ pub async fn client_loop(
     writer: impl AsyncWrite + Send + Unpin,
     remote_addr: RemoteAddr,
 ) {
-    state.metrics.inc_socket_connections(1);
+    state.service_metrics.inc_socket_connections(1);
 
     let (control_sender, mut control_receiver) = mpsc::unbounded_channel();
     let mut connection = Connection {
@@ -1132,8 +1037,8 @@ pub async fn client_loop(
             res = connection.codec.decode() => {
                 match res {
                     Ok(Some((packet, packet_size))) => {
-                        connection.state.metrics.inc_bytes_received(packet_size);
-                        connection.state.metrics.inc_msgs_received(1);
+                        connection.state.service_metrics.inc_bytes_received(packet_size);
+                        connection.state.service_metrics.inc_msgs_received(1);
                         connection.last_active = Instant::now();
                         tracing::debug!(
                             remote_addr = %connection.remote_addr,
@@ -1233,9 +1138,9 @@ pub async fn client_loop(
             .write()
             .await
             .remove(&*client_id);
-        connection.state.metrics.dec_connection_count(1);
+        connection.state.service_metrics.dec_connection_count(1);
 
-        crate::state::add_session_timeout_handle(
+        ServiceState::add_session_timeout_handle(
             state.clone(),
             client_id.to_string(),
             connection.last_will,
@@ -1245,5 +1150,5 @@ pub async fn client_loop(
         .await;
     }
 
-    state.metrics.dec_socket_connections(1);
+    state.service_metrics.dec_socket_connections(1);
 }

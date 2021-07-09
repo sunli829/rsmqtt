@@ -41,13 +41,13 @@ step:
             packet_id: 1
             filters:
               - path: test
-                qos: AtMostOnce
+                qos: ExactlyOnce
         - type: recv
           packet:
             type: suback
             packet_id: 1
             reason_codes:
-              - QoS0
+              - QoS2
     - type: sequence
       id: a
       steps:
@@ -101,12 +101,44 @@ step:
         - type: recv
           packet:
             type: publish
-            qos: AtMostOnce
+            qos: ExactlyOnce
+            packet_id: 1
             topic: test
             payload: "1"
         - type: recv
           packet:
             type: publish
-            qos: AtMostOnce
+            qos: ExactlyOnce
+            packet_id: 2
             topic: test
             payload: "2"
+        - type: send
+          packet:
+            type: pubrec
+            packet_id: 1
+            reason_code: Success
+        - type: recv
+          packet:
+            type: pubrel
+            packet_id: 1
+            reason_code: Success
+        - type: send
+          packet:
+            type: pubcomp
+            packet_id: 1
+            reason_code: Success
+        - type: send
+          packet:
+            type: pubrec
+            packet_id: 2
+            reason_code: Success
+        - type: recv
+          packet:
+            type: pubrel
+            packet_id: 2
+            reason_code: Success
+        - type: send
+          packet:
+            type: pubcomp
+            packet_id: 2
+            reason_code: Success

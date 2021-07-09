@@ -1,0 +1,79 @@
+config:
+  subscriptions:
+    - path: "#"
+      qos: AtMostOnce
+  rewrites:
+    - pattern: a/(.*)
+      write: k/$1
+    - pattern: c/1/(.*)
+      write: k/1/$1
+    - pattern: c/(.*)
+      write: k/2/$1
+step:
+  type: sequence
+  steps:
+    - type: sequence
+      id: a
+      steps:
+        - type: connect
+        - type: send
+          packet:
+            type: connect
+            level: V5
+        - type: recv
+          packet:
+            type: connack
+            session_present: false
+            reason_code: Success
+            properties:
+              server_keep_alive: 30
+              session_expiry_interval: 60
+              topic_alias_max: 32
+        - type: send
+          packet:
+            type: publish
+            qos: AtMostOnce
+            topic: a/1
+            payload: "1"
+        - type: send
+          packet:
+            type: publish
+            qos: AtMostOnce
+            topic: a/2
+            payload: "2"
+        - type: send
+          packet:
+            type: publish
+            qos: AtMostOnce
+            topic: c/1/33
+            payload: "3"
+        - type: send
+          packet:
+            type: publish
+            qos: AtMostOnce
+            topic: c/44
+            payload: "44"
+        - type: recv
+          packet:
+            type: publish
+            qos: AtMostOnce
+            topic: k/1
+            payload: "1"
+        - type: recv
+          packet:
+            type: publish
+            qos: AtMostOnce
+            topic: k/2
+            payload: "2"
+        - type: recv
+          packet:
+            type: publish
+            qos: AtMostOnce
+            topic: k/1/33
+            payload: "3"
+        - type: recv
+          packet:
+            type: publish
+            qos: AtMostOnce
+            topic: k/2/44
+            payload: "44"
