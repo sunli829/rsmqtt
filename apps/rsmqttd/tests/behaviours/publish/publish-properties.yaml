@@ -16,7 +16,6 @@ step:
             reason_code: Success
             properties:
               server_keep_alive: 30
-              session_expiry_interval: 60
               topic_alias_max: 32
     - type: sequence
       id: b
@@ -33,7 +32,6 @@ step:
             reason_code: Success
             properties:
               server_keep_alive: 30
-              session_expiry_interval: 60
               topic_alias_max: 32
         - type: send
           packet:
@@ -58,6 +56,7 @@ step:
             topic: test
             payload: "1"
             properties:
+              payload_format_indicator: true
               response_topic: reply
               correlation_data: [1, 2, 3, 4, 5]
               user_properties:
@@ -74,6 +73,7 @@ step:
             topic: test
             payload: "1"
             properties:
+              payload_format_indicator: true
               response_topic: reply
               correlation_data: [1, 2, 3, 4, 5]
               user_properties:

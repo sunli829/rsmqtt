@@ -1,7 +1,3 @@
-config:
-  subscriptions:
-    - path: a/+
-      qos: AtMostOnce
 step:
   type: sequence
   steps:
@@ -13,6 +9,7 @@ step:
           packet:
             type: connect
             level: V5
+            last_will:
         - type: recv
           packet:
             type: connack
@@ -25,23 +22,12 @@ step:
           packet:
             type: publish
             qos: AtMostOnce
-            topic: a/1
-            payload: "1"
-        - type: send
-          packet:
-            type: publish
-            qos: AtMostOnce
-            topic: a/2
-            payload: "2"
+            topic: test
+            payload: [0x8f]
+            properties:
+              payload_format_indicator: true
         - type: recv
           packet:
-            type: publish
-            qos: AtMostOnce
-            topic: a/1
-            payload: "1"
-        - type: recv
-          packet:
-            type: publish
-            qos: AtMostOnce
-            topic: a/2
-            payload: "2"
+            type: disconnect
+            reason_code: PayloadFormatInvalid
+        - type: eof

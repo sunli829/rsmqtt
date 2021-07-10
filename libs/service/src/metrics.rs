@@ -184,7 +184,6 @@ impl MetricsCalc {
         let pub_msgs_received = service_metrics.pub_msgs_received.load(Ordering::Relaxed);
         let pub_msgs_sent = service_metrics.pub_msgs_sent.load(Ordering::Relaxed);
         let msgs_dropped = service_metrics.msgs_dropped.load(Ordering::Relaxed);
-        let clients_expired = service_metrics.clients_expired.load(Ordering::Relaxed);
         let socket_connections = service_metrics.socket_connections.load(Ordering::Relaxed);
         let connection_count = service_metrics.connection_count.load(Ordering::Relaxed);
         let StorageMetrics {
@@ -194,6 +193,7 @@ impl MetricsCalc {
             messages_count,
             messages_bytes,
             subscriptions_count,
+            clients_expired,
         } = *storage_metrics;
 
         self.max_clients = self.max_clients.max(connection_count);

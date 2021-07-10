@@ -1,0 +1,59 @@
+step:
+  type: sequence
+  id: a
+  steps:
+    - type: connect
+    - type: send
+      packet:
+        type: connect
+        level: V5
+        clean_start: true
+    - type: recv
+      packet:
+        type: connack
+        session_present: false
+        reason_code: Success
+        properties:
+          server_keep_alive: 30
+          topic_alias_max: 32
+    - type: disconnect
+    - type: delay
+      duration: 1
+    - type: connect
+    - type: send
+      packet:
+        type: connect
+        level: V5
+        clean_start: false
+    - type: recv
+      packet:
+        type: connack
+        session_present: false
+        reason_code: Success
+        properties:
+          server_keep_alive: 30
+          topic_alias_max: 32
+    - type: send
+      packet:
+        type: disconnect
+        reason_code: NormalDisconnection
+        properties:
+          session_expiry_interval: 30
+    - type: eof
+    - type: disconnect
+    - type: delay
+      duration: 1
+    - type: connect
+    - type: send
+      packet:
+        type: connect
+        level: V5
+        clean_start: false
+    - type: recv
+      packet:
+        type: connack
+        session_present: true
+        reason_code: Success
+        properties:
+          server_keep_alive: 30
+          topic_alias_max: 32

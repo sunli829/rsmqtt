@@ -1,6 +1,8 @@
-use std::collections::{HashMap, VecDeque};
+use std::cmp::Ordering;
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::num::{NonZeroU16, NonZeroUsize};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use codec::{LastWill, Publish, Qos, RetainHandling};
 use fnv::FnvHashMap;
@@ -18,6 +20,7 @@ pub struct StorageMetrics {
     pub messages_count: usize,
     pub messages_bytes: usize,
     pub subscriptions_count: usize,
+    pub clients_expired: usize,
 }
 
 #[derive(Debug)]
@@ -122,21 +125,87 @@ struct Session {
     notify: Arc<Notify>,
     subscription_filters: Filters,
     last_will: Option<LastWill>,
-    session_expiry_interval: u32,
-    last_will_expiry_interval: u32,
     inflight_pub_packets: VecDeque<Publish>,
     uncompleted_messages: FnvHashMap<NonZeroU16, Message>,
+    last_will_timeout_key: Option<TimeoutKey>,
+    remove_timeout_key: Option<TimeoutKey>,
+}
+
+#[derive(Debug, Eq, PartialEq, Clone, Ord)]
+struct TimeoutKey {
+    client_id: String,
+    timeout: Instant,
+}
+
+impl PartialOrd for TimeoutKey {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        match self.timeout.cmp(&other.timeout) {
+            Ordering::Less => Some(Ordering::Less),
+            Ordering::Greater => Some(Ordering::Greater),
+            Ordering::Equal => self.client_id.partial_cmp(&other.client_id),
+        }
+    }
 }
 
 #[derive(Default)]
 struct StorageInner {
     retain_messages: HashMap<String, Message>,
     sessions: HashMap<String, RwLock<Session>>,
-
-    /// All of the share subscriptions
-    ///
-    /// share name -> client id -> filters
+    send_last_will_timeout: BTreeSet<TimeoutKey>,
+    remove_timeout: BTreeSet<TimeoutKey>,
     share_subscriptions: HashMap<String, HashMap<String, Filters>>,
+    clients_expired: usize,
+}
+
+impl StorageInner {
+    pub fn publish(&self, msgs: impl IntoIterator<Item = Message>) {
+        let mut matched_clients = Vec::new();
+
+        for msg in msgs {
+            for (client_id, session) in self.sessions.iter() {
+                let session = session.upgradable_read();
+                if let Some(msg) = session.subscription_filters.filter_message(client_id, &msg) {
+                    let mut session = RwLockUpgradableReadGuard::upgrade(session);
+                    session.queue.push_back(msg);
+                    session.notify.notify_one();
+                }
+            }
+
+            matched_clients.clear();
+            for clients in self.share_subscriptions.values() {
+                for (client_id, filters) in clients {
+                    if let Some(msg) = filters.filter_message(client_id, &msg) {
+                        matched_clients.push((client_id, msg));
+                    }
+                }
+
+                if !matched_clients.is_empty() {
+                    let (client_id, msg) =
+                        matched_clients.swap_remove(fastrand::usize(0..matched_clients.len()));
+                    if let Some(session) = self.sessions.get(client_id.as_str()) {
+                        let mut session = session.write();
+                        session.queue.push_back(msg);
+                        session.notify.notify_one();
+                    }
+                }
+            }
+        }
+    }
+
+    fn remove_session(&mut self, client_id: &str) {
+        if let Some(session) = self.sessions.remove(client_id) {
+            let session = session.into_inner();
+            if let Some(key) = &session.last_will_timeout_key {
+                self.send_last_will_timeout.remove(key);
+            }
+            if let Some(key) = &session.remove_timeout_key {
+                self.remove_timeout.remove(key);
+            }
+        }
+        for clients in self.share_subscriptions.values_mut() {
+            clients.remove(client_id);
+        }
+    }
 }
 
 #[derive(Default)]
@@ -159,25 +228,33 @@ impl Storage {
         client_id: &str,
         clean_start: bool,
         last_will: Option<LastWill>,
-        session_expiry_interval: u32,
-        last_will_expiry_interval: u32,
     ) -> (bool, Arc<Notify>) {
         let mut inner = self.inner.write();
         let mut session_present = false;
 
         if !clean_start {
-            if let Some(session) = inner.sessions.get_mut(client_id) {
-                let mut session = session.write();
-                session.last_will = last_will.clone();
-                session.session_expiry_interval = session_expiry_interval;
-                session.last_will_expiry_interval = last_will_expiry_interval;
-                session_present = true;
+            let (last_will_timeout_key, remove_timeout_key) =
+                if let Some(session) = inner.sessions.get_mut(client_id) {
+                    let mut session = session.write();
+                    session.last_will = last_will.clone();
+                    session_present = true;
+
+                    (
+                        session.last_will_timeout_key.take(),
+                        session.remove_timeout_key.take(),
+                    )
+                } else {
+                    (None, None)
+                };
+
+            if let Some(key) = last_will_timeout_key {
+                inner.send_last_will_timeout.remove(&key);
+            }
+            if let Some(key) = remove_timeout_key {
+                inner.remove_timeout.remove(&key);
             }
         } else {
-            inner.sessions.remove(client_id);
-            for clients in inner.share_subscriptions.values_mut() {
-                clients.remove(client_id);
-            }
+            inner.remove_session(client_id);
         }
 
         if !session_present {
@@ -186,10 +263,10 @@ impl Storage {
                 notify: Arc::new(Notify::new()),
                 subscription_filters: Filters::default(),
                 last_will,
-                session_expiry_interval,
-                last_will_expiry_interval,
                 inflight_pub_packets: VecDeque::default(),
                 uncompleted_messages: FnvHashMap::default(),
+                last_will_timeout_key: None,
+                remove_timeout_key: None,
             });
             inner.sessions.insert(client_id.to_string(), session);
         }
@@ -198,16 +275,92 @@ impl Storage {
         (session_present, notify)
     }
 
-    pub fn remove_session(&self, client_id: &str) -> bool {
+    pub fn disconnect_session(&self, client_id: &str, session_expiry_interval: u32) {
         let mut inner = self.inner.write();
-        let mut found = false;
-        if inner.sessions.remove(client_id).is_some() {
-            found = true;
+        let mut send_last_will_timeout = None;
+        let mut remove_timeout = None;
+
+        if let Some(session) = inner.sessions.get(client_id) {
+            let mut session = session.write();
+            let now = Instant::now();
+
+            if let Some(interval) = session.last_will.as_ref().map(|last_will| {
+                last_will
+                    .properties
+                    .delay_interval
+                    .unwrap_or_default()
+                    .min(session_expiry_interval)
+            }) {
+                let key = TimeoutKey {
+                    client_id: client_id.to_string(),
+                    timeout: now + Duration::from_secs(interval as u64),
+                };
+                send_last_will_timeout = Some(key.clone());
+                session.last_will_timeout_key = Some(key);
+            }
+
+            let key = TimeoutKey {
+                client_id: client_id.to_string(),
+                timeout: now + Duration::from_secs(session_expiry_interval as u64),
+            };
+            remove_timeout = Some(key.clone());
+            session.remove_timeout_key = Some(key);
         }
-        for clients in inner.share_subscriptions.values_mut() {
-            clients.remove(client_id);
+
+        if let Some(send_last_will_timeout) = send_last_will_timeout {
+            inner.send_last_will_timeout.insert(send_last_will_timeout);
         }
-        found
+
+        if let Some(remove_timeout) = remove_timeout {
+            inner.remove_timeout.insert(remove_timeout);
+        }
+    }
+
+    pub fn update_sessions(&self) {
+        let mut inner = self.inner.write();
+        let now = Instant::now();
+        let mut last_wills = Vec::new();
+
+        loop {
+            match inner.send_last_will_timeout.iter().next().cloned() {
+                Some(key) if key.timeout < now => {
+                    inner.send_last_will_timeout.remove(&key);
+                    if let Some(session) = inner.sessions.get(&key.client_id) {
+                        let mut session = session.write();
+                        if let Some(last_will) = session.last_will.take() {
+                            last_wills.push((key.client_id, last_will));
+                        }
+                    }
+                }
+                _ => break,
+            }
+        }
+
+        loop {
+            match inner.remove_timeout.iter().next().cloned() {
+                Some(key) if key.timeout < now => {
+                    tracing::debug!(
+                        client_id = %key.client_id,
+                        "session timeout",
+                    );
+
+                    inner.remove_session(&key.client_id);
+                    inner.remove_timeout.remove(&key);
+                    inner.clients_expired += 1;
+                }
+                _ => break,
+            }
+        }
+
+        for (client_id, last_will) in last_wills {
+            tracing::debug!(
+                publisher = %client_id,
+                topic = %last_will.topic,
+                "send last will message",
+            );
+
+            inner.publish(std::iter::once(Message::from_last_will(last_will)));
+        }
     }
 
     pub fn subscribe(&self, client_id: &str, filter: FilterItem) {
@@ -302,39 +455,9 @@ impl Storage {
         }
     }
 
+    #[inline]
     pub fn publish(&self, msgs: impl IntoIterator<Item = Message>) {
-        let inner = self.inner.read();
-        let mut matched_clients = Vec::new();
-
-        for msg in msgs {
-            for (client_id, session) in inner.sessions.iter() {
-                let session = session.upgradable_read();
-                if let Some(msg) = session.subscription_filters.filter_message(client_id, &msg) {
-                    let mut session = RwLockUpgradableReadGuard::upgrade(session);
-                    session.queue.push_back(msg);
-                    session.notify.notify_one();
-                }
-            }
-
-            matched_clients.clear();
-            for clients in inner.share_subscriptions.values() {
-                for (client_id, filters) in clients {
-                    if let Some(msg) = filters.filter_message(client_id, &msg) {
-                        matched_clients.push((client_id, msg));
-                    }
-                }
-
-                if !matched_clients.is_empty() {
-                    let (client_id, msg) =
-                        matched_clients.swap_remove(fastrand::usize(0..matched_clients.len()));
-                    if let Some(session) = inner.sessions.get(client_id.as_str()) {
-                        let mut session = session.write();
-                        session.queue.push_back(msg);
-                        session.notify.notify_one();
-                    }
-                }
-            }
-        }
+        self.inner.read().publish(msgs);
     }
 
     pub fn add_inflight_pub_packet(&self, client_id: &str, publish: Publish) {
@@ -447,6 +570,7 @@ impl Storage {
                     .values()
                     .map(|session| session.read().subscription_filters.len())
                     .sum::<usize>(),
+            clients_expired: inner.clients_expired,
         }
     }
 }

@@ -18,4 +18,3 @@ step:
         reason_code: Success
         properties:
           server_keep_alive: 30
-          session_expiry_interval: 60

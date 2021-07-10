@@ -1,5 +1,3 @@
-config:
-  max_packet_size: 20
 step:
   type: sequence
   id: a
@@ -18,16 +16,3 @@ step:
         properties:
           server_keep_alive: 30
           topic_alias_max: 32
-          max_packet_size: 20
-    - type: send
-      packet:
-        type: publish
-        qos: AtLeastOnce
-        topic: test
-        packet_id: 1
-        payload: "123456789abc"
-    - type: recv
-      packet:
-        type: disconnect
-        reason_code: PacketTooLarge
-    - type: eof

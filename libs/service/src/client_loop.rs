@@ -1,5 +1,4 @@
 use std::borrow::Cow;
-use std::convert::TryInto;
 use std::fmt::{self, Display, Formatter};
 use std::num::NonZeroU16;
 use std::sync::Arc;
@@ -9,11 +8,11 @@ use anyhow::Result;
 use bytestring::ByteString;
 use codec::{
     Codec, ConnAck, ConnAckProperties, Connect, ConnectReasonCode, DecodeError, Disconnect,
-    DisconnectProperties, DisconnectReasonCode, EncodeError, LastWill, Packet, PubAck,
-    PubAckProperties, PubAckReasonCode, PubComp, PubCompProperties, PubCompReasonCode, PubRec,
-    PubRecProperties, PubRecReasonCode, PubRel, PubRelProperties, PubRelReasonCode, Publish, Qos,
-    SubAck, SubAckProperties, Subscribe, SubscribeReasonCode, UnsubAck, UnsubAckProperties,
-    UnsubAckReasonCode, Unsubscribe,
+    DisconnectProperties, DisconnectReasonCode, EncodeError, LastWill, Level, Packet,
+    PacketIdAllocator, PubAck, PubAckProperties, PubAckReasonCode, PubComp, PubCompProperties,
+    PubCompReasonCode, PubRec, PubRecProperties, PubRecReasonCode, PubRel, PubRelProperties,
+    PubRelReasonCode, Publish, Qos, SubAck, SubAckProperties, Subscribe, SubscribeReasonCode,
+    UnsubAck, UnsubAckProperties, UnsubAckReasonCode, Unsubscribe,
 };
 use fnv::FnvHashMap;
 use serde::{Deserialize, Serialize};
@@ -69,8 +68,7 @@ pub struct Connection<R, W> {
     keep_alive: u16,
     last_active: Instant,
     last_will: Option<LastWill>,
-    last_will_expiry_interval: u32,
-    next_packet_id: u16,
+    packet_id_allocator: PacketIdAllocator,
     inflight_qos2_messages: FnvHashMap<NonZeroU16, Qos2State>,
 }
 
@@ -79,17 +77,6 @@ where
     R: AsyncRead + Send + Unpin,
     W: AsyncWrite + Send + Unpin,
 {
-    #[inline]
-    fn take_packet_id(&mut self) -> NonZeroU16 {
-        let id = self.next_packet_id;
-        if self.next_packet_id == u16::MAX {
-            self.next_packet_id = 1;
-        } else {
-            self.next_packet_id += 1;
-        }
-        id.try_into().unwrap()
-    }
-
     async fn send_packet(&mut self, packet: &Packet) -> Result<(), Error> {
         tracing::debug!(
             remote_addr = %self.remote_addr,
@@ -199,9 +186,8 @@ where
                 }
                 Some(session_expiry_interval) => session_expiry_interval,
                 None => {
-                    conn_ack_properties.session_expiry_interval =
-                        Some(self.state.config.max_session_expiry_interval);
-                    self.state.config.max_session_expiry_interval
+                    // If the Session Expiry Interval is absent the value 0 is used.
+                    0
                 }
             }
         };
@@ -274,6 +260,22 @@ where
                 .await?;
                 return Ok(());
             }
+
+            if last_will
+                .properties
+                .payload_format_indicator
+                .unwrap_or_default()
+            {
+                if std::str::from_utf8(&last_will.payload).is_err() {
+                    self.send_packet(&Packet::ConnAck(ConnAck {
+                        session_present: false,
+                        reason_code: ConnectReasonCode::PayloadFormatInvalid,
+                        properties: ConnAckProperties::default(),
+                    }))
+                    .await?;
+                    return Ok(());
+                }
+            }
         }
 
         if connect.client_id.is_empty() {
@@ -293,13 +295,6 @@ where
             connect.client_id = format!("auto-{}", uuid::Uuid::new_v4()).into();
             conn_ack_properties.assigned_client_identifier = Some(connect.client_id.clone());
         }
-
-        let last_will_expiry_interval = connect
-            .last_will
-            .as_ref()
-            .map(|last_will| last_will.properties.delay_interval)
-            .flatten()
-            .unwrap_or_default();
 
         // auth
         let mut uid = None;
@@ -329,26 +324,19 @@ where
             }
         }
 
+        if connect.level == Level::V4 {
+            if !connect.clean_start {
+                connect.properties.session_expiry_interval =
+                    Some(self.state.config.max_session_expiry_interval);
+            }
+        }
+
         // create session
         let (session_present, notify) = self.state.storage.create_session(
             &connect.client_id,
             connect.clean_start,
             connect.last_will.clone(),
-            session_expiry_interval,
-            last_will_expiry_interval,
         );
-
-        if session_present {
-            if let Some(join_handle) = self
-                .state
-                .session_timeouts
-                .lock()
-                .await
-                .remove(&*connect.client_id)
-            {
-                join_handle.abort();
-            }
-        }
 
         self.uid = uid;
         self.notify = notify;
@@ -360,7 +348,6 @@ where
         self.receive_out_quota = receive_out_max;
         self.max_topic_alias = max_topic_alias as usize;
         self.session_expiry_interval = session_expiry_interval;
-        self.last_will_expiry_interval = last_will_expiry_interval;
         self.last_will = connect.last_will.clone();
 
         self.codec.set_output_max_size(max_packet_size_out as usize);
@@ -420,7 +407,6 @@ where
                     }
                 };
 
-                println!("***");
                 let item = FilterItem {
                     topic_filter,
                     qos: s.qos,
@@ -499,6 +485,18 @@ where
             return Err(Error::server_disconnect(
                 DisconnectReasonCode::RetainNotSupported,
             ));
+        }
+
+        if publish
+            .properties
+            .payload_format_indicator
+            .unwrap_or_default()
+        {
+            if std::str::from_utf8(&publish.payload).is_err() {
+                return Err(Error::server_disconnect(
+                    DisconnectReasonCode::PayloadFormatInvalid,
+                ));
+            }
         }
 
         publish.topic = match publish.properties.topic_alias {
@@ -886,6 +884,9 @@ where
         if disconnect.reason_code == DisconnectReasonCode::NormalDisconnection {
             self.last_will = None;
         }
+        if let Some(session_expiry_interval) = disconnect.properties.session_expiry_interval {
+            self.session_expiry_interval = session_expiry_interval;
+        }
         Err(Error::ClientDisconnect(disconnect))
     }
 
@@ -963,7 +964,7 @@ where
         match publish.qos {
             Qos::AtMostOnce => self.send_packet(&Packet::Publish(publish)).await,
             Qos::AtLeastOnce | Qos::ExactlyOnce => {
-                let packet_id = self.take_packet_id();
+                let packet_id = self.packet_id_allocator.take();
                 publish.packet_id = Some(packet_id);
 
                 if publish.qos > Qos::AtMostOnce {
@@ -1015,8 +1016,7 @@ pub async fn client_loop(
         keep_alive: 60,
         last_active: Instant::now(),
         last_will: None,
-        last_will_expiry_interval: 0,
-        next_packet_id: 1,
+        packet_id_allocator: PacketIdAllocator::default(),
         inflight_qos2_messages: FnvHashMap::default(),
     };
     let mut keep_alive_interval = tokio::time::interval(Duration::from_secs(1));
@@ -1139,15 +1139,10 @@ pub async fn client_loop(
             .await
             .remove(&*client_id);
         connection.state.service_metrics.dec_connection_count(1);
-
-        ServiceState::add_session_timeout_handle(
-            state.clone(),
-            client_id.to_string(),
-            connection.last_will,
-            connection.session_expiry_interval,
-            connection.last_will_expiry_interval,
-        )
-        .await;
+        connection
+            .state
+            .storage
+            .disconnect_session(&client_id, connection.session_expiry_interval);
     }
 
     state.service_metrics.dec_socket_connections(1);

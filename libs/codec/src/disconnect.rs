@@ -243,7 +243,9 @@ impl Disconnect {
         data.write_remaining_length(size)?;
 
         if level == Level::V5 {
-            if self.reason_code != DisconnectReasonCode::NormalDisconnection {
+            if self.reason_code != DisconnectReasonCode::NormalDisconnection
+                || !self.properties.is_empty()
+            {
                 data.put_u8(self.reason_code.into());
             }
 

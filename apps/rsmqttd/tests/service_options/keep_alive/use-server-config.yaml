@@ -18,5 +18,4 @@ step:
         reason_code: Success
         properties:
           server_keep_alive: 60
-          session_expiry_interval: 60
           topic_alias_max: 32

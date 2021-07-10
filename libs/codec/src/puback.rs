@@ -149,7 +149,7 @@ impl PubAck {
         data.put_u16(self.packet_id.get());
 
         if level == Level::V5 {
-            if self.reason_code != PubAckReasonCode::Success {
+            if self.reason_code != PubAckReasonCode::Success || !self.properties.is_empty() {
                 data.put_u8(self.reason_code.into());
             }
 

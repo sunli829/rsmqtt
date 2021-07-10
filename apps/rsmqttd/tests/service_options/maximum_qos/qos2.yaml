@@ -17,5 +17,4 @@ step:
         session_present: false
         reason_code: Success
         properties:
-          session_expiry_interval: 60
           topic_alias_max: 32

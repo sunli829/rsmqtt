@@ -5,17 +5,14 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use bytestring::ByteString;
-use codec::LastWill;
 use tokio::sync::{mpsc, oneshot, watch, Mutex, RwLock};
-use tokio::task::JoinHandle;
+use tokio_stream::Stream;
 
 use crate::config::ServiceConfig;
-use crate::message::Message;
 use crate::metrics::{Metrics, MetricsCalc};
 use crate::plugin::Plugin;
 use crate::rewrite::Rewrite;
 use crate::storage::Storage;
-use tokio_stream::Stream;
 
 #[derive(Debug, Default)]
 pub struct ServiceMetrics {
@@ -28,7 +25,6 @@ pub struct ServiceMetrics {
     pub pub_msgs_received: AtomicUsize,
     pub pub_msgs_sent: AtomicUsize,
     pub msgs_dropped: AtomicUsize,
-    pub clients_expired: AtomicUsize,
     pub socket_connections: AtomicUsize,
     pub connection_count: AtomicUsize,
 }
@@ -80,18 +76,13 @@ impl ServiceMetrics {
     }
 
     #[inline]
-    pub fn inc_clients_expired(&self, value: usize) {
-        self.clients_expired.fetch_add(value, Ordering::Relaxed);
-    }
-
-    #[inline]
     pub fn inc_socket_connections(&self, value: usize) {
-        self.clients_expired.fetch_add(value, Ordering::Relaxed);
+        self.socket_connections.fetch_add(value, Ordering::Relaxed);
     }
 
     #[inline]
     pub fn dec_socket_connections(&self, value: usize) {
-        self.clients_expired.fetch_sub(value, Ordering::Relaxed);
+        self.socket_connections.fetch_sub(value, Ordering::Relaxed);
     }
 
     #[inline]
@@ -114,7 +105,6 @@ pub struct ServiceState {
     pub config: ServiceConfig,
     pub(crate) connections: RwLock<HashMap<String, mpsc::UnboundedSender<Control>>>,
     pub(crate) storage: Storage,
-    pub(crate) session_timeouts: Mutex<HashMap<String, JoinHandle<()>>>,
     pub(crate) service_metrics: Arc<ServiceMetrics>,
     pub(crate) plugins: Vec<(&'static str, Arc<dyn Plugin>)>,
     rewrites: Vec<Rewrite>,
@@ -138,18 +128,29 @@ impl ServiceState {
                 })?);
         }
 
-        Ok(Arc::new(Self {
+        let state = Arc::new(Self {
             config,
             connections: RwLock::new(HashMap::new()),
             storage: Storage::default(),
-            session_timeouts: Mutex::new(HashMap::new()),
             service_metrics: Arc::new(ServiceMetrics::default()),
             metrics_sender: stat_sender,
             plugins,
             rewrites,
             metrics_receiver: stat_receiver,
             metrics_calc: Mutex::new(MetricsCalc::new()),
-        }))
+        });
+
+        tokio::spawn({
+            let state = state.clone();
+            async move {
+                loop {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    state.storage.update_sessions();
+                }
+            }
+        });
+
+        Ok(state)
     }
 
     pub(crate) fn rewrite(&self, topic: &mut ByteString) {
@@ -159,59 +160,6 @@ impl ServiceState {
                 break;
             }
         }
-    }
-
-    pub async fn add_session_timeout_handle(
-        state: Arc<ServiceState>,
-        client_id: String,
-        last_will: Option<LastWill>,
-        session_expiry_interval: u32,
-        last_will_expiry_interval: u32,
-    ) {
-        let session_timeout_handle = {
-            let state = state.clone();
-            let client_id = client_id.clone();
-
-            tokio::spawn(async move {
-                let last_will_expiry_interval =
-                    last_will_expiry_interval.min(session_expiry_interval);
-                let session_expiry_interval =
-                    if last_will_expiry_interval <= session_expiry_interval {
-                        session_expiry_interval - last_will_expiry_interval
-                    } else {
-                        0
-                    };
-
-                tokio::time::sleep(Duration::from_secs(last_will_expiry_interval as u64)).await;
-                if let Some(last_will) = last_will {
-                    tracing::debug!(
-                        publisher = %client_id,
-                        topic = %last_will.topic,
-                        "send last will message",
-                    );
-
-                    state
-                        .storage
-                        .publish(std::iter::once(Message::from_last_will(last_will)));
-                }
-
-                tokio::time::sleep(Duration::from_secs(session_expiry_interval as u64)).await;
-
-                tracing::debug!(
-                    client_id = %client_id,
-                    "session timeout",
-                );
-
-                state.storage.remove_session(&client_id);
-                state.session_timeouts.lock().await.remove(&client_id);
-                state.service_metrics.inc_clients_expired(1);
-            })
-        };
-        state
-            .session_timeouts
-            .lock()
-            .await
-            .insert(client_id, session_timeout_handle);
     }
 
     pub async fn update_metrics(&self) {

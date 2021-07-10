@@ -1,0 +1,22 @@
+step:
+  type: sequence
+  steps:
+    - type: sequence
+      id: a
+      steps:
+        - type: connect
+        - type: send
+          packet:
+            type: connect
+            level: V5
+            last_will:
+              topic: test
+              payload: [0x8f]
+              qos: AtMostOnce
+              properties:
+                payload_format_indicator: true
+        - type: recv
+          packet:
+            type: connack
+            session_present: false
+            reason_code: PayloadFormatInvalid
