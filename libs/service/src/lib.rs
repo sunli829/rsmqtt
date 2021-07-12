@@ -4,7 +4,8 @@
 mod client_loop;
 mod config;
 mod error;
-mod filter;
+mod filter_tree;
+mod filter_util;
 mod message;
 mod metrics;
 mod rewrite;
@@ -18,7 +19,6 @@ pub use client_loop::{client_loop, RemoteAddr};
 pub use codec;
 pub use config::ServiceConfig;
 pub use error::Error;
-pub use filter::TopicFilter;
 pub use message::Message;
 pub use metrics::Metrics;
 pub use state::ServiceState;

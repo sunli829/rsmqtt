@@ -1,6 +1,6 @@
 use bytes::{Buf, BytesMut};
 use criterion::{criterion_group, criterion_main, Criterion};
-use rsmqtt_codec::{Level, Packet, Publish, PublishProperties, Qos};
+use rsmqtt_codec::{Packet, ProtocolLevel, Publish, PublishProperties, Qos};
 
 fn encode_publish(c: &mut Criterion) {
     let packet = Packet::Publish(Publish {
@@ -17,7 +17,7 @@ fn encode_publish(c: &mut Criterion) {
     c.bench_function("encode publish", |b| {
         b.iter(|| {
             buf.clear();
-            Packet::encode(&packet, &mut buf, Level::V5, usize::MAX).unwrap();
+            Packet::encode(&packet, &mut buf, ProtocolLevel::V5, usize::MAX).unwrap();
         });
     });
 }
@@ -33,14 +33,14 @@ fn decode_publish(c: &mut Criterion) {
         payload: "abcdefgabcdefgabcdefgabcdefgabcdefgabcdefg".into(),
     });
     let mut buf = BytesMut::new();
-    Packet::encode(&packet, &mut buf, Level::V5, usize::MAX).unwrap();
+    Packet::encode(&packet, &mut buf, ProtocolLevel::V5, usize::MAX).unwrap();
     let mut packet_data = buf.freeze();
     let flag = packet_data[0];
     packet_data.advance(2);
 
     c.bench_function("decode publish", |b| {
         b.iter(|| {
-            Packet::decode(packet_data.clone(), flag, Level::V5).unwrap();
+            Packet::decode(packet_data.clone(), flag, ProtocolLevel::V5).unwrap();
         });
     });
 }

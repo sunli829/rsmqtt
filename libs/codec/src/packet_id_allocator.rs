@@ -17,7 +17,7 @@ impl PacketIdAllocator {
         if self.0 == u16::MAX {
             self.0 = 1;
         } else {
-            self.0 = self.0 + 1;
+            self.0 += 1;
         }
         id.try_into().unwrap()
     }

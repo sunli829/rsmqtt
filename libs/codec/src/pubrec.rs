@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::packet::PUBREC;
 use crate::reader::PacketReader;
 use crate::writer::{bytes_remaining_length, PacketWriter};
-use crate::{property, DecodeError, EncodeError, Level};
+use crate::{property, DecodeError, EncodeError, ProtocolLevel};
 
 #[derive(
     Debug, Clone, Copy, PartialEq, IntoPrimitive, TryFromPrimitive, Serialize, Deserialize,
@@ -108,10 +108,10 @@ pub struct PubRec {
 
 impl PubRec {
     #[inline]
-    fn variable_header_length(&self, level: Level) -> Result<usize, EncodeError> {
+    fn variable_header_length(&self, level: ProtocolLevel) -> Result<usize, EncodeError> {
         match level {
-            Level::V4 => Ok(2),
-            Level::V5 => {
+            ProtocolLevel::V4 => Ok(2),
+            ProtocolLevel::V5 => {
                 if !self.properties.is_empty() {
                     let properties_len = self.properties.bytes_length()?;
                     return Ok(2
@@ -130,14 +130,14 @@ impl PubRec {
     }
 
     #[inline]
-    fn payload_length(&self, _level: Level) -> Result<usize, EncodeError> {
+    fn payload_length(&self, _level: ProtocolLevel) -> Result<usize, EncodeError> {
         Ok(0)
     }
 
     pub(crate) fn encode(
         &self,
         data: &mut BytesMut,
-        level: Level,
+        level: ProtocolLevel,
         max_size: usize,
     ) -> Result<(), EncodeError> {
         data.put_u8(PUBREC << 4);
@@ -148,7 +148,7 @@ impl PubRec {
 
         data.put_u16(self.packet_id.get());
 
-        if level == Level::V5 {
+        if level == ProtocolLevel::V5 {
             if self.reason_code != PubRecReasonCode::Success || !self.properties.is_empty() {
                 data.put_u8(self.reason_code.into());
             }
@@ -162,7 +162,7 @@ impl PubRec {
         Ok(())
     }
 
-    pub(crate) fn decode(mut data: Bytes, level: Level) -> Result<Self, DecodeError> {
+    pub(crate) fn decode(mut data: Bytes, level: ProtocolLevel) -> Result<Self, DecodeError> {
         let packet_id = data
             .read_u16()?
             .try_into()
@@ -170,7 +170,7 @@ impl PubRec {
         let mut reason_code = PubRecReasonCode::Success;
         let mut properties = PubRecProperties::default();
 
-        if level == Level::V5 {
+        if level == ProtocolLevel::V5 {
             if data.has_remaining() {
                 let n_reason_code = data.read_u8()?;
                 reason_code = n_reason_code

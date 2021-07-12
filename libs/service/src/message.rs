@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
-    publisher: Option<ByteString>,
+    from_client_id: Option<ByteString>,
+    from_uid: Option<ByteString>,
     created_at: SystemTime,
     topic: ByteString,
     qos: Qos,
@@ -20,7 +21,8 @@ impl Message {
     #[inline]
     pub fn new(topic: ByteString, qos: Qos, payload: Bytes) -> Self {
         Self {
-            publisher: None,
+            from_client_id: None,
+            from_uid: None,
             created_at: SystemTime::now(),
             topic,
             qos,
@@ -43,14 +45,25 @@ impl Message {
     }
 
     #[inline]
-    pub fn with_publisher(mut self, publisher: impl Into<ByteString>) -> Self {
-        self.publisher = Some(publisher.into());
+    pub fn with_from_client_id(mut self, client_id: impl Into<ByteString>) -> Self {
+        self.from_client_id = Some(client_id.into());
         self
     }
 
     #[inline]
-    pub fn publisher(&self) -> Option<&ByteString> {
-        self.publisher.as_ref()
+    pub fn with_from_uid(mut self, uid: impl Into<ByteString>) -> Self {
+        self.from_uid = Some(uid.into());
+        self
+    }
+
+    #[inline]
+    pub fn from_client_id(&self) -> Option<&ByteString> {
+        self.from_client_id.as_ref()
+    }
+
+    #[inline]
+    pub fn from_uid(&self) -> Option<&ByteString> {
+        self.from_uid.as_ref()
     }
 
     #[inline]
@@ -110,7 +123,7 @@ impl Message {
     }
 
     #[inline]
-    pub fn from_publish(publisher: Option<ByteString>, publish: &Publish) -> Self {
+    pub fn from_publish(publish: &Publish) -> Self {
         let properties = PublishProperties {
             payload_format_indicator: publish.properties.payload_format_indicator,
             message_expiry_interval: publish.properties.message_expiry_interval,
@@ -121,11 +134,9 @@ impl Message {
             ..PublishProperties::default()
         };
 
-        let mut msg = Self::new(publish.topic.clone(), publish.qos, publish.payload.clone())
+        Self::new(publish.topic.clone(), publish.qos, publish.payload.clone())
             .with_retain(publish.retain)
-            .with_properties(properties);
-        msg.publisher = publisher;
-        msg
+            .with_properties(properties)
     }
 
     #[inline]

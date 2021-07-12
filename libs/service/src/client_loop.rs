@@ -8,8 +8,8 @@ use anyhow::Result;
 use bytestring::ByteString;
 use codec::{
     Codec, ConnAck, ConnAckProperties, Connect, ConnectReasonCode, DecodeError, Disconnect,
-    DisconnectProperties, DisconnectReasonCode, EncodeError, LastWill, Level, Packet,
-    PacketIdAllocator, PubAck, PubAckProperties, PubAckReasonCode, PubComp, PubCompProperties,
+    DisconnectProperties, DisconnectReasonCode, EncodeError, LastWill, Packet, PacketIdAllocator,
+    ProtocolLevel, PubAck, PubAckProperties, PubAckReasonCode, PubComp, PubCompProperties,
     PubCompReasonCode, PubRec, PubRecProperties, PubRecReasonCode, PubRel, PubRelProperties,
     PubRelReasonCode, Publish, Qos, SubAck, SubAckProperties, Subscribe, SubscribeReasonCode,
     UnsubAck, UnsubAckProperties, UnsubAckReasonCode, Unsubscribe,
@@ -17,14 +17,13 @@ use codec::{
 use fnv::FnvHashMap;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::{mpsc, oneshot, Notify};
+use tokio::sync::{mpsc, Notify};
 
 use crate::error::Error;
-use crate::filter::{self, TopicFilter};
+use crate::filter_util;
 use crate::message::Message;
 use crate::plugin::Action;
 use crate::state::Control;
-use crate::storage::FilterItem;
 use crate::ServiceState;
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -55,7 +54,7 @@ pub struct Connection<R, W> {
     remote_addr: RemoteAddr,
     client_id: Option<ByteString>,
     control_sender: mpsc::UnboundedSender<Control>,
-    uid: Option<String>,
+    uid: Option<ByteString>,
     notify: Arc<Notify>,
     codec: Codec<R, W>,
     session_expiry_interval: u32,
@@ -265,16 +264,15 @@ where
                 .properties
                 .payload_format_indicator
                 .unwrap_or_default()
+                && std::str::from_utf8(&last_will.payload).is_err()
             {
-                if std::str::from_utf8(&last_will.payload).is_err() {
-                    self.send_packet(&Packet::ConnAck(ConnAck {
-                        session_present: false,
-                        reason_code: ConnectReasonCode::PayloadFormatInvalid,
-                        properties: ConnAckProperties::default(),
-                    }))
-                    .await?;
-                    return Ok(());
-                }
+                self.send_packet(&Packet::ConnAck(ConnAck {
+                    session_present: false,
+                    reason_code: ConnectReasonCode::PayloadFormatInvalid,
+                    properties: ConnAckProperties::default(),
+                }))
+                .await?;
+                return Ok(());
             }
         }
 
@@ -302,7 +300,7 @@ where
             for (name, plugin) in &self.state.plugins {
                 match plugin.auth(&login.username, &login.password).await {
                     Ok(Some(res_uid)) => {
-                        uid = Some(res_uid);
+                        uid = Some(res_uid.into());
                         break;
                     }
                     Ok(None) => {}
@@ -324,11 +322,17 @@ where
             }
         }
 
-        if connect.level == Level::V4 {
-            if !connect.clean_start {
-                connect.properties.session_expiry_interval =
-                    Some(self.state.config.max_session_expiry_interval);
+        if connect.level == ProtocolLevel::V4 && !connect.clean_start {
+            connect.properties.session_expiry_interval =
+                Some(self.state.config.max_session_expiry_interval);
+        }
+
+        {
+            let mut connections = self.state.connections.write().await;
+            if let Some(control_sender) = connections.remove(&*connect.client_id) {
+                control_sender.send(Control::SessionTakenOver).ok();
             }
+            connections.insert(connect.client_id.to_string(), self.control_sender.clone());
         }
 
         // create session
@@ -353,28 +357,6 @@ where
         self.codec.set_output_max_size(max_packet_size_out as usize);
         self.codec.set_input_max_size(max_packet_size_in as usize);
 
-        loop {
-            let mut connections = self.state.connections.write().await;
-            if let Some(control_sender) = connections.get(&*connect.client_id).cloned() {
-                drop(connections);
-                let (tx_reply, rx_reply) = oneshot::channel();
-                if control_sender
-                    .send(Control::SessionTakenOver(tx_reply))
-                    .is_err()
-                {
-                    return Err(Error::internal_error("failed to call control_sender.send"));
-                }
-                if rx_reply.await.is_err() {
-                    return Err(Error::internal_error(
-                        "failed to receive control_sender.reply",
-                    ));
-                }
-            } else {
-                connections.insert(connect.client_id.to_string(), self.control_sender.clone());
-                break;
-            }
-        }
-
         self.send_packet(&Packet::ConnAck(ConnAck {
             session_present,
             reason_code: ConnectReasonCode::Success,
@@ -382,6 +364,18 @@ where
         }))
         .await?;
         self.state.service_metrics.inc_connection_count(1);
+
+        for (_, plugin) in &self.state.plugins {
+            plugin
+                .on_client_connected(
+                    &self.remote_addr,
+                    self.client_id.as_ref().unwrap(),
+                    self.uid.as_deref(),
+                    self.keep_alive,
+                    connect.level,
+                )
+                .await;
+        }
 
         if session_present {
             // retry send inflight publish
@@ -396,8 +390,8 @@ where
             }
         } else {
             for s in &self.state.config.subscriptions {
-                let topic_filter = match TopicFilter::try_new(&*s.path) {
-                    Some(topic_filter) => topic_filter,
+                let filter = match filter_util::parse_filter(&s.path) {
+                    Some(filter) => filter,
                     None => {
                         tracing::warn!(
                             filter = %s.path,
@@ -406,16 +400,15 @@ where
                         continue;
                     }
                 };
-
-                let item = FilterItem {
-                    topic_filter,
-                    qos: s.qos,
-                    no_local: s.no_local,
-                    retain_as_published: s.retain_as_published,
-                    retain_handling: s.retain_handling,
-                    id: None,
-                };
-                self.state.storage.subscribe(&connect.client_id, item);
+                self.state.storage.subscribe(
+                    &connect.client_id,
+                    filter,
+                    s.qos,
+                    s.no_local,
+                    s.retain_as_published,
+                    s.retain_handling,
+                    None,
+                );
             }
         }
 
@@ -471,7 +464,7 @@ where
             ));
         }
 
-        if !publish.topic.is_empty() && !filter::valid_topic(&publish.topic) {
+        if !publish.topic.is_empty() && !filter_util::valid_topic(&publish.topic) {
             return Err(Error::server_disconnect(
                 DisconnectReasonCode::TopicNameInvalid,
             ));
@@ -491,12 +484,11 @@ where
             .properties
             .payload_format_indicator
             .unwrap_or_default()
+            && std::str::from_utf8(&publish.payload).is_err()
         {
-            if std::str::from_utf8(&publish.payload).is_err() {
-                return Err(Error::server_disconnect(
-                    DisconnectReasonCode::PayloadFormatInvalid,
-                ));
-            }
+            return Err(Error::server_disconnect(
+                DisconnectReasonCode::PayloadFormatInvalid,
+            ));
         }
 
         publish.topic = match publish.properties.topic_alias {
@@ -531,14 +523,29 @@ where
         self.state.rewrite(&mut publish.topic);
 
         // create message
-        let msg = Message::from_publish(Some(client_id.clone()), &publish)
-            .with_publisher(client_id.clone());
+        let mut msg = Message::from_publish(&publish).with_from_client_id(client_id.clone());
+        if let Some(uid) = &self.uid {
+            msg = msg.with_from_uid(uid.clone());
+        }
 
         if retain {
             // update retained message
             self.state
                 .storage
                 .update_retained_message(msg.topic(), msg.clone());
+        }
+
+        for (_, plugin) in &self.state.plugins {
+            plugin
+                .on_message_publish(
+                    self.client_id.as_ref().unwrap(),
+                    self.uid.as_deref(),
+                    msg.topic(),
+                    msg.qos(),
+                    msg.is_retain(),
+                    msg.payload().clone(),
+                )
+                .await;
         }
 
         // do publish
@@ -783,8 +790,8 @@ where
 
         let mut reason_codes = Vec::with_capacity(subscribe.filters.len());
 
-        for filter in &subscribe.filters {
-            let topic_filter = match TopicFilter::try_new(filter.path.clone()) {
+        for s in &subscribe.filters {
+            let filter = match filter_util::parse_filter(&s.path) {
                 Some(filter) => filter,
                 None => {
                     reason_codes.push(SubscribeReasonCode::TopicFilterInvalid);
@@ -792,14 +799,16 @@ where
                 }
             };
 
-            if topic_filter.is_share() && filter.no_local {
+            if filter.share_name.is_some() && s.no_local {
                 // It is a Protocol Error to set the No Local bit to 1 on a Shared Subscription [MQTT-3.8.3-4].
                 return Err(Error::server_disconnect(
                     DisconnectReasonCode::ProtocolError,
                 ));
             }
 
-            if !self.state.config.wildcard_subscription_available && topic_filter.has_wildcards() {
+            if !self.state.config.wildcard_subscription_available
+                && filter_util::has_wildcards(filter.path)
+            {
                 reason_codes.push(SubscribeReasonCode::WildcardSubscriptionsNotSupported);
                 continue;
             }
@@ -807,7 +816,18 @@ where
             // check acl
             self.check_acl(Action::Subscribe, &filter.path).await?;
 
-            let qos = filter.qos.min(self.state.config.maximum_qos);
+            let qos = s.qos.min(self.state.config.maximum_qos);
+
+            for (_, plugin) in &self.state.plugins {
+                plugin
+                    .on_session_subscribed(
+                        self.client_id.as_ref().unwrap(),
+                        self.uid.as_deref(),
+                        &s.path,
+                        qos,
+                    )
+                    .await;
+            }
 
             reason_codes.push(match qos {
                 Qos::AtMostOnce => SubscribeReasonCode::QoS0,
@@ -815,15 +835,15 @@ where
                 Qos::ExactlyOnce => SubscribeReasonCode::QoS2,
             });
 
-            let filter_item = FilterItem {
-                topic_filter,
-                qos,
-                no_local: filter.no_local,
-                retain_as_published: filter.retain_as_published,
-                retain_handling: filter.retain_handling,
-                id: subscribe.properties.id,
-            };
-            self.state.storage.subscribe(&client_id, filter_item);
+            self.state.storage.subscribe(
+                &client_id,
+                filter,
+                s.qos,
+                s.no_local,
+                s.retain_as_published,
+                s.retain_handling,
+                subscribe.properties.id,
+            );
         }
 
         self.send_packet(&Packet::SubAck(SubAck {
@@ -847,16 +867,26 @@ where
         };
         let mut reason_codes = Vec::new();
 
-        for filter in unsubscribe.filters {
-            let topic_filter = match TopicFilter::try_new(&*filter) {
-                Some(topic_filter) => topic_filter,
+        for path in unsubscribe.filters {
+            let filter = match filter_util::parse_filter(&*path) {
+                Some(filter) => filter,
                 None => {
                     reason_codes.push(UnsubAckReasonCode::TopicFilterInvalid);
                     continue;
                 }
             };
 
-            match self.state.storage.unsubscribe(client_id, topic_filter) {
+            for (_, plugin) in &self.state.plugins {
+                plugin
+                    .on_session_unsubscribed(
+                        self.client_id.as_ref().unwrap(),
+                        self.uid.as_deref(),
+                        &path,
+                    )
+                    .await;
+            }
+
+            match self.state.storage.unsubscribe(client_id, filter) {
                 true => reason_codes.push(UnsubAckReasonCode::Success),
                 false => reason_codes.push(UnsubAckReasonCode::NoSubscriptionExisted),
             }
@@ -892,12 +922,9 @@ where
 
     async fn handle_control(&mut self, control: Control) -> Result<(), Error> {
         match control {
-            Control::SessionTakenOver(reply) => {
-                if let Some(client_id) = self.client_id.take() {
-                    self.state.connections.write().await.remove(&*client_id);
-                    self.state.service_metrics.dec_connection_count(1);
-                }
-                reply.send(()).ok();
+            Control::SessionTakenOver => {
+                self.client_id = None;
+                self.state.service_metrics.dec_connection_count(1);
                 Err(Error::SessionTakenOver)
             }
         }
@@ -915,41 +942,18 @@ where
                 .next_messages(&client_id, Some(self.receive_out_quota));
             assert!(msgs.len() <= self.receive_out_quota);
 
-            let mut publish_err = None;
-            let mut consume_count = 0;
             for msg in msgs {
                 if msg.is_expired() {
                     continue;
                 }
-
-                if let Err(err) = self.publish_to_client(msg).await {
-                    publish_err = Some(err);
-                    break;
-                }
-                consume_count += 1;
-            }
-
-            if let Some(err) = publish_err {
-                tracing::debug!(
-                    client_id = %client_id,
-                    remote_addr = %self.remote_addr,
-                    error = %err,
-                    "failed to publish message to client",
-                );
-                return Err(Error::internal_error(err));
-            }
-
-            if consume_count > 0 {
-                self.state
-                    .storage
-                    .consume_messages(&client_id, consume_count);
+                self.delive(msg).await?;
             }
         }
 
         Ok(())
     }
 
-    async fn publish_to_client(&mut self, msg: Message) -> Result<(), Error> {
+    async fn delive(&mut self, msg: Message) -> Result<(), Error> {
         let client_id = match self.client_id.clone() {
             Some(client_id) => client_id,
             None => return Ok(()),
@@ -959,6 +963,21 @@ where
             Some(publish) => publish,
             None => return Ok(()),
         };
+
+        for (_, plugin) in &self.state.plugins {
+            plugin
+                .on_message_delivered(
+                    self.client_id.as_ref().unwrap(),
+                    self.uid.as_deref(),
+                    msg.from_client_id().map(|s| &**s),
+                    msg.from_uid().map(|s| &**s),
+                    msg.topic(),
+                    msg.qos(),
+                    msg.is_retain(),
+                    msg.payload().clone(),
+                )
+                .await;
+        }
 
         self.state.service_metrics.inc_pub_msgs_sent(1);
         match publish.qos {
@@ -1131,18 +1150,24 @@ pub async fn client_loop(
         }
     }
 
-    if let Some(client_id) = connection.client_id {
+    if let Some(client_id) = &connection.client_id {
         connection
             .state
             .connections
             .write()
             .await
-            .remove(&*client_id);
+            .remove(&**client_id);
         connection.state.service_metrics.dec_connection_count(1);
         connection
             .state
             .storage
             .disconnect_session(&client_id, connection.session_expiry_interval);
+
+        for (_, plugin) in &connection.state.plugins {
+            plugin
+                .on_client_disconnected(client_id, connection.uid.as_deref())
+                .await;
+        }
     }
 
     state.service_metrics.dec_socket_connections(1);

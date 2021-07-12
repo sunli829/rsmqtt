@@ -38,6 +38,6 @@ pub use pubrec::{PubRec, PubRecProperties, PubRecReasonCode};
 pub use pubrel::{PubRel, PubRelProperties, PubRelReasonCode};
 pub use suback::{SubAck, SubAckProperties, SubscribeReasonCode};
 pub use subscribe::{RetainHandling, Subscribe, SubscribeFilter, SubscribeProperties};
-pub use types::{Level, Login, Qos};
+pub use types::{Login, ProtocolLevel, Qos};
 pub use unsuback::{UnsubAck, UnsubAckProperties, UnsubAckReasonCode};
 pub use unsubscribe::{Unsubscribe, UnsubscribeProperties};

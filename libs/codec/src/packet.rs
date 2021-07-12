@@ -2,8 +2,8 @@ use bytes::{BufMut, Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ConnAck, Connect, DecodeError, Disconnect, EncodeError, Level, PubAck, PubComp, PubRec, PubRel,
-    Publish, SubAck, Subscribe, UnsubAck, Unsubscribe,
+    ConnAck, Connect, DecodeError, Disconnect, EncodeError, ProtocolLevel, PubAck, PubComp, PubRec,
+    PubRel, Publish, SubAck, Subscribe, UnsubAck, Unsubscribe,
 };
 
 pub const RESERVED: u8 = 0;
@@ -43,7 +43,7 @@ pub enum Packet {
 }
 
 impl Packet {
-    pub fn decode(data: Bytes, flag: u8, level: Level) -> Result<Self, DecodeError> {
+    pub fn decode(data: Bytes, flag: u8, level: ProtocolLevel) -> Result<Self, DecodeError> {
         let packet = match (flag & 0xf0) >> 4 {
             RESERVED => return Err(DecodeError::ReservedPacketType),
             CONNECT => Self::Connect(Connect::decode(data, level)?),
@@ -68,7 +68,7 @@ impl Packet {
     pub fn encode(
         &self,
         data: &mut BytesMut,
-        level: Level,
+        level: ProtocolLevel,
         max_size: usize,
     ) -> Result<(), EncodeError> {
         match self {

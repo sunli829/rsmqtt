@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::packet::UNSUBSCRIBE;
 use crate::reader::PacketReader;
 use crate::writer::{bytes_remaining_length, PacketWriter};
-use crate::{property, DecodeError, EncodeError, Level};
+use crate::{property, DecodeError, EncodeError, ProtocolLevel};
 
 #[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct UnsubscribeProperties {
@@ -67,9 +67,9 @@ pub struct Unsubscribe {
 
 impl Unsubscribe {
     #[inline]
-    fn variable_header_length(&self, level: Level) -> Result<usize, EncodeError> {
+    fn variable_header_length(&self, level: ProtocolLevel) -> Result<usize, EncodeError> {
         let mut len = 2;
-        if level == Level::V5 {
+        if level == ProtocolLevel::V5 {
             let properties_len = self.properties.bytes_length()?;
             len += bytes_remaining_length(properties_len)? + self.properties.bytes_length()?;
         }
@@ -77,7 +77,7 @@ impl Unsubscribe {
     }
 
     #[inline]
-    fn payload_length(&self, _level: Level) -> Result<usize, EncodeError> {
+    fn payload_length(&self, _level: ProtocolLevel) -> Result<usize, EncodeError> {
         Ok(self
             .filters
             .iter()
@@ -85,7 +85,11 @@ impl Unsubscribe {
             .sum::<usize>())
     }
 
-    pub(crate) fn decode(mut data: Bytes, level: Level, flags: u8) -> Result<Self, DecodeError> {
+    pub(crate) fn decode(
+        mut data: Bytes,
+        level: ProtocolLevel,
+        flags: u8,
+    ) -> Result<Self, DecodeError> {
         if flags & 0x0f != 0b0010 {
             return Err(DecodeError::MalformedPacket);
         }
@@ -97,7 +101,7 @@ impl Unsubscribe {
 
         let mut properties = UnsubscribeProperties::default();
 
-        if level == Level::V5 {
+        if level == ProtocolLevel::V5 {
             let properties_len = data.read_remaining_length()?;
             ensure!(
                 data.remaining() >= properties_len,
@@ -122,7 +126,7 @@ impl Unsubscribe {
     pub(crate) fn encode(
         &self,
         data: &mut BytesMut,
-        level: Level,
+        level: ProtocolLevel,
         max_size: usize,
     ) -> Result<(), EncodeError> {
         data.put_u8((UNSUBSCRIBE << 4) | 0b0010);
@@ -133,7 +137,7 @@ impl Unsubscribe {
 
         data.put_u16(self.packet_id.get());
 
-        if level == Level::V5 {
+        if level == ProtocolLevel::V5 {
             data.write_remaining_length(self.properties.bytes_length()?)?;
             self.properties.encode(data)?;
         }

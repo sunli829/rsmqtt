@@ -6,10 +6,12 @@ use std::time::{Duration, Instant};
 
 use codec::{LastWill, Publish, Qos, RetainHandling};
 use fnv::FnvHashMap;
-use parking_lot::{RwLock, RwLockUpgradableReadGuard};
+use indexmap::IndexMap;
+use parking_lot::RwLock;
 use tokio::sync::Notify;
 
-use crate::filter::TopicFilter;
+use crate::filter_tree::FilterTree;
+use crate::filter_util::Filter;
 use crate::message::Message;
 
 #[derive(Debug)]
@@ -23,9 +25,8 @@ pub struct StorageMetrics {
     pub clients_expired: usize,
 }
 
-#[derive(Debug)]
-pub struct FilterItem {
-    pub topic_filter: TopicFilter,
+#[derive(Debug, Copy, Clone)]
+struct FilterItem {
     pub qos: Qos,
     pub no_local: bool,
     pub retain_as_published: bool,
@@ -33,97 +34,9 @@ pub struct FilterItem {
     pub id: Option<NonZeroUsize>,
 }
 
-#[derive(Debug, Default)]
-pub struct Filters(HashMap<String, FilterItem>);
-
-impl Filters {
-    #[inline]
-    pub fn insert(&mut self, item: FilterItem) -> Option<FilterItem> {
-        self.0.insert(item.topic_filter.path().to_string(), item)
-    }
-
-    #[inline]
-    pub fn remove(&mut self, path: &str) -> Option<FilterItem> {
-        self.0.remove(path)
-    }
-
-    #[inline]
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    #[inline]
-    pub fn filter_message(&self, client_id: &str, msg: &Message) -> Option<Message> {
-        let mut matched = false;
-        let mut max_qos = Qos::AtMostOnce;
-        let mut retain = msg.is_retain();
-        let mut ids = Vec::new();
-
-        if msg.is_expired() {
-            return None;
-        }
-
-        for filter in self.0.values() {
-            if filter.no_local && msg.publisher().map(|s| &**s) == Some(client_id) {
-                // If no local is true, Application Messages MUST NOT be forwarded to a connection with
-                // a ClientID equal to the ClientID of the publishing connection [MQTT-3.8.3-3]
-                continue;
-            }
-
-            if !filter.topic_filter.matches(msg.topic()) {
-                continue;
-            }
-
-            if let Some(id) = filter.id {
-                // If the Client specified a Subscription Identifier for any of the overlapping
-                // subscriptions the Server MUST send those Subscription Identifiers in the message
-                // which is published as the result of the subscriptions [MQTT-3.3.4-3].
-                //
-                // If the Server sends a single copy of the message it MUST include in the PUBLISH packet
-                // the Subscription Identifiers for all matching subscriptions which have a Subscription Identifiers,
-                // their order is not significant [MQTT-3.3.4-4].
-                ids.push(id);
-            }
-
-            // When Clients make subscriptions with Topic Filters that include wildcards, it is possible
-            // for a Client’s subscriptions to overlap so that a published message might match multiple filters.
-            // In this case the Server MUST deliver the message to the Client respecting the maximum QoS of all
-            // the matching subscriptions [MQTT-3.3.4-2].
-            max_qos = max_qos.max(filter.qos);
-
-            if !filter.retain_as_published {
-                retain = false;
-            }
-
-            matched = true;
-        }
-
-        if matched {
-            let mut properties = msg.properties().clone();
-            properties.subscription_identifiers = ids;
-            let msg = Message::new(
-                msg.topic().clone(),
-                msg.qos().min(max_qos),
-                msg.payload().clone(),
-            )
-            .with_retain(retain)
-            .with_properties(properties);
-            Some(msg)
-        } else {
-            None
-        }
-    }
-}
-
 struct Session {
     queue: VecDeque<Message>,
     notify: Arc<Notify>,
-    subscription_filters: Filters,
     last_will: Option<LastWill>,
     inflight_pub_packets: VecDeque<Publish>,
     uncompleted_messages: FnvHashMap<NonZeroU16, Message>,
@@ -131,7 +44,62 @@ struct Session {
     remove_timeout_key: Option<TimeoutKey>,
 }
 
-#[derive(Debug, Eq, PartialEq, Clone, Ord)]
+impl Session {
+    #[inline]
+    fn add_message<'a>(
+        &mut self,
+        msg: &Message,
+        filter_items: impl IntoIterator<Item = &'a FilterItem>,
+    ) {
+        let mut filter_items = filter_items.into_iter();
+        let first_item = match filter_items.next() {
+            Some(first_item) => first_item,
+            None => return,
+        };
+        let mut qos = first_item.qos;
+        let mut retain_as_published = first_item.retain_as_published;
+        let mut ids = first_item.id.into_iter().collect::<Vec<_>>();
+
+        for item in filter_items {
+            // When Clients make subscriptions with Topic Filters that include wildcards, it is possible
+            // for a Client’s subscriptions to overlap so that a published message might match multiple filters.
+            // In this case the Server MUST deliver the message to the Client respecting the maximum QoS of all
+            // the matching subscriptions [MQTT-3.3.4-2].
+            qos = qos.max(item.qos);
+
+            retain_as_published &= item.retain_as_published;
+
+            // If the Client specified a Subscription Identifier for any of the overlapping
+            // subscriptions the Server MUST send those Subscription Identifiers in the message
+            // which is published as the result of the subscriptions [MQTT-3.3.4-3].
+            //
+            // If the Server sends a single copy of the message it MUST include in the PUBLISH packet
+            // the Subscription Identifiers for all matching subscriptions which have a Subscription Identifiers,
+            // their order is not significant [MQTT-3.3.4-4].
+            ids.extend(item.id.into_iter());
+        }
+
+        let mut new_msg = Message::new(
+            msg.topic().clone(),
+            msg.qos().min(qos),
+            msg.payload().clone(),
+        )
+        .with_properties({
+            let mut properties = msg.properties().clone();
+            properties.subscription_identifiers = ids;
+            properties
+        });
+
+        if retain_as_published {
+            new_msg = new_msg.with_retain(msg.is_retain());
+        }
+
+        self.queue.push_back(new_msg);
+        self.notify.notify_one();
+    }
+}
+
+#[derive(Debug, Eq, PartialEq, Clone)]
 struct TimeoutKey {
     client_id: String,
     timeout: Instant,
@@ -147,46 +115,68 @@ impl PartialOrd for TimeoutKey {
     }
 }
 
+impl Ord for TimeoutKey {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.partial_cmp(other).unwrap()
+    }
+}
+
 #[derive(Default)]
 struct StorageInner {
     retain_messages: HashMap<String, Message>,
     sessions: HashMap<String, RwLock<Session>>,
+    filter_tree: FilterTree<String, FilterItem>,
     send_last_will_timeout: BTreeSet<TimeoutKey>,
     remove_timeout: BTreeSet<TimeoutKey>,
-    share_subscriptions: HashMap<String, HashMap<String, Filters>>,
+    share_subscriptions: HashMap<String, FilterTree<String, FilterItem>>,
     clients_expired: usize,
 }
 
 impl StorageInner {
     pub fn publish(&self, msgs: impl IntoIterator<Item = Message>) {
-        let mut matched_clients = Vec::new();
-
         for msg in msgs {
-            for (client_id, session) in self.sessions.iter() {
-                let session = session.upgradable_read();
-                if let Some(msg) = session.subscription_filters.filter_message(client_id, &msg) {
-                    let mut session = RwLockUpgradableReadGuard::upgrade(session);
-                    session.queue.push_back(msg);
-                    session.notify.notify_one();
+            if msg.is_expired() {
+                continue;
+            }
+
+            let mut matched = HashMap::new();
+
+            // share subscriptions
+            for filter_tree in self.share_subscriptions.values() {
+                let mut share_matches: IndexMap<&String, Vec<&FilterItem>> = IndexMap::new();
+                for (client_id, filter_item) in filter_tree.matches(msg.topic()) {
+                    share_matches
+                        .entry(client_id)
+                        .or_default()
+                        .push(filter_item);
+                }
+                if !share_matches.is_empty() {
+                    let (client_id, filter_items) = share_matches
+                        .swap_remove_index(fastrand::usize(0..share_matches.len()))
+                        .unwrap();
+                    matched.insert(client_id, filter_items);
                 }
             }
 
-            matched_clients.clear();
-            for clients in self.share_subscriptions.values() {
-                for (client_id, filters) in clients {
-                    if let Some(msg) = filters.filter_message(client_id, &msg) {
-                        matched_clients.push((client_id, msg));
-                    }
+            // normal subscriptions
+            for (client_id, filter_item) in self.filter_tree.matches(msg.topic()) {
+                if filter_item.no_local && msg.from_client_id().map(|s| &**s) == Some(client_id) {
+                    // If no local is true, Application Messages MUST NOT be forwarded to a connection with
+                    // a ClientID equal to the ClientID of the publishing connection [MQTT-3.8.3-3]
+                    continue;
                 }
 
-                if !matched_clients.is_empty() {
-                    let (client_id, msg) =
-                        matched_clients.swap_remove(fastrand::usize(0..matched_clients.len()));
-                    if let Some(session) = self.sessions.get(client_id.as_str()) {
-                        let mut session = session.write();
-                        session.queue.push_back(msg);
-                        session.notify.notify_one();
-                    }
+                matched
+                    .entry(client_id)
+                    .and_modify(|items| items.push(filter_item))
+                    .or_insert_with(|| vec![filter_item]);
+            }
+
+            // do push
+            for (client_id, filter_items) in matched {
+                if let Some(session) = self.sessions.get(client_id) {
+                    let mut session = session.write();
+                    session.add_message(&msg, filter_items);
                 }
             }
         }
@@ -202,8 +192,9 @@ impl StorageInner {
                 self.remove_timeout.remove(key);
             }
         }
-        for clients in self.share_subscriptions.values_mut() {
-            clients.remove(client_id);
+        self.filter_tree.remove_all(client_id);
+        for filter_tree in self.share_subscriptions.values_mut() {
+            filter_tree.remove_all(client_id);
         }
     }
 }
@@ -213,6 +204,7 @@ pub struct Storage {
     inner: RwLock<StorageInner>,
 }
 
+#[allow(clippy::too_many_arguments)]
 impl Storage {
     pub fn update_retained_message(&self, topic: &str, msg: Message) {
         let mut inner = self.inner.write();
@@ -261,7 +253,6 @@ impl Storage {
             let session = RwLock::new(Session {
                 queue: VecDeque::new(),
                 notify: Arc::new(Notify::new()),
-                subscription_filters: Filters::default(),
                 last_will,
                 inflight_pub_packets: VecDeque::default(),
                 uncompleted_messages: FnvHashMap::default(),
@@ -363,79 +354,97 @@ impl Storage {
         }
     }
 
-    pub fn subscribe(&self, client_id: &str, filter: FilterItem) {
-        if let Some(share_name) = filter.topic_filter.share_name().map(ToString::to_string) {
-            let mut inner = self.inner.write();
+    pub fn subscribe(
+        &self,
+        client_id: &str,
+        filter: Filter<'_>,
+        qos: Qos,
+        no_local: bool,
+        retain_as_published: bool,
+        retain_handling: RetainHandling,
+        id: Option<NonZeroUsize>,
+    ) {
+        let mut inner = self.inner.write();
+        let filter_item = FilterItem {
+            qos,
+            no_local,
+            retain_as_published,
+            retain_handling,
+            id,
+        };
+
+        if let Some(share_name) = filter.share_name {
             inner
                 .share_subscriptions
-                .entry(share_name)
+                .entry(share_name.to_string())
                 .or_default()
-                .entry(client_id.to_string())
-                .or_default()
-                .insert(filter);
+                .insert(filter.path, client_id.to_string(), filter_item);
         } else {
-            let inner = self.inner.read();
-            let mut session = inner.sessions.get(client_id).unwrap().write();
+            let is_new_subscribe = inner
+                .filter_tree
+                .insert(filter.path, client_id.to_string(), filter_item)
+                .is_none();
 
-            let retain_handling = filter.retain_handling;
-            let is_new_subscribe = session.subscription_filters.insert(filter).is_none();
+            // send retained messages
+            if !inner.retain_messages.is_empty() {
+                let publish_retain = matches!(
+                    (retain_handling, is_new_subscribe),
+                    (RetainHandling::OnEverySubscribe, _) | (RetainHandling::OnNewSubscribe, true)
+                );
 
-            let publish_retain = matches!(
-                (retain_handling, is_new_subscribe),
-                (RetainHandling::OnEverySubscribe, _) | (RetainHandling::OnNewSubscribe, true)
-            );
+                if publish_retain {
+                    if let Some(session) = inner.sessions.get(client_id) {
+                        let mut session = session.write();
 
-            if publish_retain {
-                let mut has_retain = false;
+                        let mut filter_tree = FilterTree::default();
+                        filter_tree.insert(filter.path, client_id, ());
 
-                for msg in inner.retain_messages.values() {
-                    if let Some(msg) = session.subscription_filters.filter_message(client_id, msg) {
-                        session.queue.push_back(msg);
-                        has_retain = true;
+                        for msg in inner.retain_messages.values() {
+                            if msg.is_expired() {
+                                continue;
+                            }
+
+                            if filter_item.no_local
+                                && msg.from_client_id().map(|s| &**s) == Some(client_id)
+                            {
+                                // If no local is true, Application Messages MUST NOT be forwarded to a connection with
+                                // a ClientID equal to the ClientID of the publishing connection [MQTT-3.8.3-3]
+                                continue;
+                            }
+
+                            if filter_tree.is_matched(msg.topic()) {
+                                session.add_message(msg, std::iter::once(&filter_item));
+                            }
+                        }
                     }
-                }
-
-                if has_retain {
-                    session.notify.notify_one();
                 }
             }
         }
     }
 
-    pub fn unsubscribe(&self, client_id: &str, filter: TopicFilter) -> bool {
-        if let Some(share_name) = filter.share_name() {
-            let mut inner = self.inner.write();
+    pub fn unsubscribe(&self, client_id: &str, filter: Filter<'_>) -> bool {
+        let mut inner = self.inner.write();
+
+        if let Some(share_name) = filter.share_name {
             let mut found = false;
-            if let Some(clients) = inner.share_subscriptions.get_mut(share_name) {
-                if let Some(filters) = clients.get_mut(client_id) {
-                    found = filters.remove(filter.path()).is_some();
-                    if filters.is_empty() {
-                        clients.remove(client_id);
-                    }
-                }
-                if clients.is_empty() {
-                    inner.share_subscriptions.remove(share_name);
-                }
+            if let Some(filter_tree) = inner.share_subscriptions.get_mut(share_name) {
+                found = filter_tree.remove(filter.path, client_id).is_some();
             }
             found
         } else {
-            let inner = self.inner.read();
-            let mut session = inner.sessions.get(client_id).unwrap().write();
-            session.subscription_filters.remove(filter.path()).is_some()
+            inner.filter_tree.remove(filter.path, client_id).is_some()
         }
     }
 
     pub fn next_messages(&self, client_id: &str, limit: Option<usize>) -> Vec<Message> {
         let inner = self.inner.read();
-        let session = inner.sessions.get(client_id).unwrap().read();
+        let mut session = inner.sessions.get(client_id).unwrap().write();
         let mut limit = limit.unwrap_or(usize::MAX);
         let mut res = Vec::new();
-        let mut offset = 0;
 
         if limit > 0 {
-            while let Some(msg) = session.queue.get(offset) {
-                offset += 1;
-                res.push(msg.clone());
+            while let Some(msg) = session.queue.pop_front() {
+                res.push(msg);
                 limit -= 1;
                 if limit == 0 {
                     break;
@@ -444,15 +453,6 @@ impl Storage {
         }
 
         res
-    }
-
-    pub fn consume_messages(&self, client_id: &str, mut count: usize) {
-        let inner = self.inner.read();
-        let mut session = inner.sessions.get(client_id).unwrap().write();
-        while !session.queue.is_empty() && count > 0 {
-            session.queue.pop_front();
-            count -= 1;
-        }
     }
 
     #[inline]
@@ -562,14 +562,9 @@ impl Storage {
             subscriptions_count: inner
                 .share_subscriptions
                 .values()
-                .map(|clients| clients.values().map(|filters| filters.len()))
-                .flatten()
+                .map(|filter_tree| filter_tree.len())
                 .sum::<usize>()
-                + inner
-                    .sessions
-                    .values()
-                    .map(|session| session.read().subscription_filters.len())
-                    .sum::<usize>(),
+                + inner.filter_tree.len(),
             clients_expired: inner.clients_expired,
         }
     }

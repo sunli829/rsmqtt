@@ -5,7 +5,7 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum Error {
-    #[error("take over")]
+    #[error("taken over")]
     SessionTakenOver,
 
     #[error("internal error: {0}")]

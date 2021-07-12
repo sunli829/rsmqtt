@@ -8,7 +8,7 @@ codec = { path = "../codec", package = "rsmqtt-codec" }
 
 anyhow = "1.0.41"
 serde_yaml = "0.8.17"
-tokio = { version = "1.8.0", features = ["sync", "rt-multi-thread", "time", "macros", "net", "io-util"] }
+tokio = { version = "1.8.0", features = ["sync", "time", "macros", "net", "io-util"] }
 tracing = "0.1.26"
 tokio-stream = { version = "0.1.7", features = ["sync"] }
 bytestring = "1.0.0"
@@ -23,3 +23,6 @@ version = "3.0.0"
 parking_lot = "0.11.1"
 fastrand = "1.4.1"
 regex = "1.5.4"
+
+[dev-dependencies]
+tokio = { version = "1.8.0", features = ["rt"] }

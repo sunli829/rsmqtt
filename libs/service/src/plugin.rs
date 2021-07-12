@@ -1,8 +1,10 @@
 use std::sync::Arc;
 
+use codec::{ProtocolLevel, Qos};
 use serde_yaml::Value;
 
 use crate::RemoteAddr;
+use bytes::Bytes;
 
 pub type PluginResult<T> = anyhow::Result<T>;
 
@@ -20,7 +22,7 @@ pub enum Action {
 }
 
 /// Represents a rsmqtt plugin
-#[allow(unused_variables)]
+#[allow(unused_variables, clippy::too_many_arguments)]
 #[async_trait::async_trait]
 pub trait Plugin: Send + Sync + 'static {
     async fn auth(&self, user: &str, password: &str) -> PluginResult<Option<String>> {
@@ -35,5 +37,52 @@ pub trait Plugin: Send + Sync + 'static {
         topic: &str,
     ) -> PluginResult<bool> {
         Ok(true)
+    }
+
+    async fn on_client_connected(
+        &self,
+        remote_addr: &RemoteAddr,
+        client_id: &str,
+        uid: Option<&str>,
+        keep_alive: u16,
+        level: ProtocolLevel,
+    ) {
+    }
+
+    async fn on_client_disconnected(&self, client_id: &str, uid: Option<&str>) {}
+
+    async fn on_session_subscribed(
+        &self,
+        client_id: &str,
+        uid: Option<&str>,
+        topic: &str,
+        qos: Qos,
+    ) {
+    }
+
+    async fn on_session_unsubscribed(&self, client_id: &str, uid: Option<&str>, topic: &str) {}
+
+    async fn on_message_publish(
+        &self,
+        client_id: &str,
+        uid: Option<&str>,
+        topic: &str,
+        qos: Qos,
+        retain: bool,
+        payload: Bytes,
+    ) {
+    }
+
+    async fn on_message_delivered(
+        &self,
+        client_id: &str,
+        uid: Option<&str>,
+        from_client_id: Option<&str>,
+        from_uid: Option<&str>,
+        topic: &str,
+        qos: Qos,
+        retain: bool,
+        payload: Bytes,
+    ) {
     }
 }

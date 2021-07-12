@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
     Debug, Copy, Clone, Eq, PartialEq, IntoPrimitive, TryFromPrimitive, Serialize, Deserialize,
 )]
 #[repr(u8)]
-pub enum Level {
+pub enum ProtocolLevel {
     V4 = 4,
     V5 = 5,
 }

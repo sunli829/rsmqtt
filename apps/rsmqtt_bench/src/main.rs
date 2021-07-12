@@ -1,7 +1,6 @@
 #![forbid(unsafe_code)]
 #![warn(clippy::default_trait_access)]
 
-use std::convert::TryInto;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -10,8 +9,9 @@ use bytes::Bytes;
 use bytesize::ByteSize;
 use bytestring::ByteString;
 use codec::{
-    Codec, Connect, ConnectProperties, ConnectReasonCode, Level, Packet, Publish,
-    PublishProperties, Qos,
+    Codec, Connect, ConnectProperties, ConnectReasonCode, Packet, PacketIdAllocator, ProtocolLevel,
+    PubAck, PubAckProperties, PubAckReasonCode, Publish, PublishProperties, Qos, RetainHandling,
+    Subscribe, SubscribeFilter, SubscribeProperties,
 };
 use structopt::StructOpt;
 use tokio::net::TcpStream;
@@ -65,6 +65,8 @@ async fn main() {
 
     barrier.wait().await;
 
+    println!("connected");
+
     let mut count = 0;
     for handle in handles {
         match handle.await.unwrap() {
@@ -95,11 +97,12 @@ async fn client_loop(
     let mut codec = Codec::new(reader, writer);
     let client_id = format!("client{}", id).into();
     let topic: ByteString = format!("client{}", id).into();
+    let mut packet_id_allocator = PacketIdAllocator::default();
 
     // connect
     codec
         .encode(&Packet::Connect(Connect {
-            level: Level::V5,
+            level: ProtocolLevel::V5,
             keep_alive: 60,
             clean_start: true,
             client_id,
@@ -124,9 +127,31 @@ async fn client_loop(
         conn_ack.reason_code
     );
 
+    codec
+        .encode(&Packet::Subscribe(Subscribe {
+            packet_id: packet_id_allocator.take(),
+            properties: SubscribeProperties::default(),
+            filters: vec![SubscribeFilter {
+                path: topic.clone(),
+                qos: Qos::AtLeastOnce,
+                no_local: false,
+                retain_as_published: false,
+                retain_handling: RetainHandling::OnEverySubscribe,
+            }],
+        }))
+        .await?;
+
+    let (packet, _) = codec
+        .decode()
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("protocol error"))?;
+    match packet {
+        Packet::SubAck(_) => {}
+        _ => anyhow::bail!("protocol error"),
+    };
+
     barrier.wait().await;
 
-    let mut packet_id = 1u16;
     let start_time = Instant::now();
     let mut count = 0;
 
@@ -141,7 +166,7 @@ async fn client_loop(
                 qos: Qos::AtLeastOnce,
                 retain: false,
                 topic: topic.clone(),
-                packet_id: Some(packet_id.try_into().unwrap()),
+                packet_id: Some(packet_id_allocator.take()),
                 properties: PublishProperties::default(),
                 payload: payload.clone(),
             }))
@@ -156,11 +181,22 @@ async fn client_loop(
             _ => anyhow::bail!("protocol error"),
         };
 
-        if packet_id < u16::MAX {
-            packet_id += 1;
-        } else {
-            packet_id = 1;
-        }
+        let (packet, _) = codec
+            .decode()
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("protocol error"))?;
+        let id = match packet {
+            Packet::Publish(publish) => publish.packet_id.unwrap(),
+            _ => anyhow::bail!("protocol error"),
+        };
+
+        codec
+            .encode(&Packet::PubAck(PubAck {
+                packet_id: id,
+                reason_code: PubAckReasonCode::Success,
+                properties: PubAckProperties::default(),
+            }))
+            .await?;
 
         count += 1;
     }

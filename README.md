@@ -5,33 +5,20 @@
   <img src="https://github.com/sunli829/rsmqtt/workflows/CI/badge.svg" />
   <!-- codecov -->
   <img src="https://codecov.io/gh/sunli829/rsmqtt/branch/master/graph/badge.svg" />
+  <!-- Crates version -->
+  <a href="https://crates.io/crates/rsmqttd">
+    <img src="https://img.shields.io/crates/v/rsmqttd.svg?style=flat-square"
+    alt="Crates.io version" />
+  </a>
 </div>
 
-## TODO
+## Features
 
-- Server
-    - [X] MQTT 5.0
-    - [X] MQTT 3.1
-    - [X] Publish
-      - [X] Qos0
-      - [X] Qos1
-      - [X] Qos2
-    - [X] Subscribe/Unsubscribe
-    - [X] Last will
-    - [X] Retain message
-    - [X] Shared Subscriptions
-    - [X] Websocket transport
-    - [X] $SYS topics
-    - [ ] Telemetry
-- Plugins
-  - [X] basic-auth
-  - [X] oso-acl
-- [ ] Admin UI
-- Test
-  - [X] Framework
-- API
-  - [ ] Rest API
-  - [ ] GraphQL API
-- Rule engine
-    - [ ] Lua
-    - [ ] WASM
+- MQTT 5.0/3.1
+- Qos0/Qos1/Qos2
+- Last Will
+- Retained Messages
+- Shared Subscriptions
+- Tcp/WebSocket transport
+- Authentication
+- ACL([oso](https://crates.io/crates/oso))

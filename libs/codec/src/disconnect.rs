@@ -9,7 +9,7 @@ use crate::packet::DISCONNECT;
 use crate::reader::PacketReader;
 use crate::writer::bytes_remaining_length;
 use crate::writer::PacketWriter;
-use crate::{property, DecodeError, EncodeError, Level};
+use crate::{property, DecodeError, EncodeError, ProtocolLevel};
 
 #[derive(
     Debug, Clone, Copy, PartialEq, IntoPrimitive, TryFromPrimitive, Serialize, Deserialize,
@@ -161,10 +161,10 @@ impl Disconnect {
     }
 
     #[inline]
-    fn variable_header_length(&self, level: Level) -> Result<usize, EncodeError> {
+    fn variable_header_length(&self, level: ProtocolLevel) -> Result<usize, EncodeError> {
         match level {
-            Level::V4 => Ok(0),
-            Level::V5 => {
+            ProtocolLevel::V4 => Ok(0),
+            ProtocolLevel::V5 => {
                 if !self.properties.is_empty() {
                     let properties_len = self.properties.bytes_length()?;
                     return Ok(1
@@ -182,13 +182,13 @@ impl Disconnect {
     }
 
     #[inline]
-    fn payload_length(&self, _level: Level) -> Result<usize, EncodeError> {
+    fn payload_length(&self, _level: ProtocolLevel) -> Result<usize, EncodeError> {
         Ok(0)
     }
 
-    pub(crate) fn decode(mut data: Bytes, level: Level) -> Result<Self, DecodeError> {
+    pub(crate) fn decode(mut data: Bytes, level: ProtocolLevel) -> Result<Self, DecodeError> {
         match level {
-            Level::V4 => {
+            ProtocolLevel::V4 => {
                 if !data.is_empty() {
                     return Err(DecodeError::MalformedPacket);
                 }
@@ -197,7 +197,7 @@ impl Disconnect {
                     properties: DisconnectProperties::default(),
                 })
             }
-            Level::V5 => {
+            ProtocolLevel::V5 => {
                 if !data.has_remaining() {
                     return Ok(Self {
                         reason_code: DisconnectReasonCode::NormalDisconnection,
@@ -233,7 +233,7 @@ impl Disconnect {
     pub(crate) fn encode(
         &self,
         data: &mut BytesMut,
-        level: Level,
+        level: ProtocolLevel,
         max_size: usize,
     ) -> Result<(), EncodeError> {
         data.put_u8(DISCONNECT << 4);
@@ -242,7 +242,7 @@ impl Disconnect {
         ensure!(size < max_size, EncodeError::PacketTooLarge);
         data.write_remaining_length(size)?;
 
-        if level == Level::V5 {
+        if level == ProtocolLevel::V5 {
             if self.reason_code != DisconnectReasonCode::NormalDisconnection
                 || !self.properties.is_empty()
             {

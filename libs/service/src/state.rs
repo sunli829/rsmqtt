@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use bytestring::ByteString;
-use tokio::sync::{mpsc, oneshot, watch, Mutex, RwLock};
+use tokio::sync::{mpsc, watch, Mutex, RwLock};
 use tokio_stream::Stream;
 
 use crate::config::ServiceConfig;
@@ -98,7 +98,7 @@ impl ServiceMetrics {
 
 #[derive(Debug)]
 pub enum Control {
-    SessionTakenOver(oneshot::Sender<()>),
+    SessionTakenOver,
 }
 
 pub struct ServiceState {

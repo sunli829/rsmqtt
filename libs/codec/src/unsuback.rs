@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::packet::UNSUBACK;
 use crate::reader::PacketReader;
 use crate::writer::{bytes_remaining_length, PacketWriter};
-use crate::{property, DecodeError, EncodeError, Level};
+use crate::{property, DecodeError, EncodeError, ProtocolLevel};
 
 #[derive(
     Debug, Clone, Copy, PartialEq, IntoPrimitive, TryFromPrimitive, Serialize, Deserialize,
@@ -99,9 +99,9 @@ pub struct UnsubAck {
 
 impl UnsubAck {
     #[inline]
-    fn variable_header_length(&self, level: Level) -> Result<usize, EncodeError> {
+    fn variable_header_length(&self, level: ProtocolLevel) -> Result<usize, EncodeError> {
         let mut len = 2;
-        if level == Level::V5 {
+        if level == ProtocolLevel::V5 {
             let properties_len = self.properties.bytes_length()?;
             len += bytes_remaining_length(properties_len)? + self.properties.bytes_length()?;
         }
@@ -109,9 +109,9 @@ impl UnsubAck {
     }
 
     #[inline]
-    fn payload_length(&self, level: Level) -> Result<usize, EncodeError> {
+    fn payload_length(&self, level: ProtocolLevel) -> Result<usize, EncodeError> {
         let mut len = 0;
-        if level == Level::V5 {
+        if level == ProtocolLevel::V5 {
             len += self.reason_codes.len();
         }
         Ok(len)
@@ -120,7 +120,7 @@ impl UnsubAck {
     pub(crate) fn encode(
         &self,
         data: &mut BytesMut,
-        level: Level,
+        level: ProtocolLevel,
         max_size: usize,
     ) -> Result<(), EncodeError> {
         data.put_u8(UNSUBACK << 4);
@@ -131,7 +131,7 @@ impl UnsubAck {
 
         data.put_u16(self.packet_id.get());
 
-        if level == Level::V5 {
+        if level == ProtocolLevel::V5 {
             data.write_remaining_length(self.properties.bytes_length()?)?;
             self.properties.encode(data)?;
 
@@ -143,7 +143,7 @@ impl UnsubAck {
         Ok(())
     }
 
-    pub(crate) fn decode(mut data: Bytes, level: Level) -> Result<Self, DecodeError> {
+    pub(crate) fn decode(mut data: Bytes, level: ProtocolLevel) -> Result<Self, DecodeError> {
         let packet_id = data
             .read_u16()?
             .try_into()
@@ -152,7 +152,7 @@ impl UnsubAck {
         let mut properties = UnsubAckProperties::default();
         let mut reason_codes = Vec::new();
 
-        if level == Level::V5 {
+        if level == ProtocolLevel::V5 {
             let properties_len = data.read_remaining_length()?;
             ensure!(
                 data.remaining() >= properties_len,

@@ -45,7 +45,7 @@ fn execute_step(
         match step {
             Step::Connect { remote_addr } => {
                 let id = id.expect("expect id");
-                println!("[CONNECT] id={}", id);
+                // println!("[CONNECT] id={}", id);
                 let mut ctx = ctx.lock().await;
                 let (client, server) = tokio::io::duplex(4096);
                 let (server_reader, server_writer) = tokio::io::split(server);
@@ -69,7 +69,7 @@ fn execute_step(
             }
             Step::Disconnect => {
                 let id = id.expect("expect id");
-                println!("[DISCONNECT] id={}", id);
+                // println!("[DISCONNECT] id={}", id);
 
                 let mut ctx = ctx.lock().await;
                 assert!(
@@ -80,7 +80,7 @@ fn execute_step(
             }
             Step::Send { mut packet } => {
                 let id = id.clone().expect("expect id");
-                println!("[SEND] id={} packet={:?}", id, packet);
+                // println!("[SEND] id={} packet={:?}", id, packet);
                 if let Packet::Connect(connect) = &mut packet {
                     connect.client_id = client_id.unwrap_or_else(|| id.clone());
                 }
@@ -93,7 +93,7 @@ fn execute_step(
             }
             Step::Receive { packet, after } => {
                 let id = id.expect("expect id");
-                println!("[RECEIVE] id={} packet={:?}", id, packet);
+                // println!("[RECEIVE] id={} packet={:?}", id, packet);
                 let mut ctx = ctx.lock().await;
                 let codec = ctx
                     .clients
@@ -125,7 +125,7 @@ fn execute_step(
             }
             Step::Eof => {
                 let id = id.expect("expect id");
-                println!("[EOF] id={}", id);
+                // println!("[EOF] id={}", id);
                 let mut ctx = ctx.lock().await;
                 let codec = ctx
                     .clients
@@ -139,7 +139,7 @@ fn execute_step(
                 }
             }
             Step::Delay { duration } => {
-                println!("[DELAY] duration={}", duration);
+                // println!("[DELAY] duration={}", duration);
                 tokio::time::sleep(Duration::from_secs(duration)).await
             }
             Step::Parallel { steps } => {

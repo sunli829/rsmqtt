@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::packet::CONNACK;
 use crate::reader::PacketReader;
 use crate::writer::{bytes_remaining_length, PacketWriter};
-use crate::{property, DecodeError, EncodeError, Level, Qos};
+use crate::{property, DecodeError, EncodeError, ProtocolLevel, Qos};
 
 #[derive(
     Debug, Clone, Copy, PartialEq, IntoPrimitive, TryFromPrimitive, Serialize, Deserialize,
@@ -306,9 +306,9 @@ pub struct ConnAck {
 
 impl ConnAck {
     #[inline]
-    fn variable_header_length(&self, level: Level) -> Result<usize, EncodeError> {
+    fn variable_header_length(&self, level: ProtocolLevel) -> Result<usize, EncodeError> {
         let mut len = 1 + 1;
-        if level == Level::V5 {
+        if level == ProtocolLevel::V5 {
             let properties_len = self.properties.bytes_length()?;
             len += bytes_remaining_length(properties_len)? + self.properties.bytes_length()?;
         }
@@ -316,14 +316,14 @@ impl ConnAck {
     }
 
     #[inline]
-    fn payload_length(&self, _level: Level) -> Result<usize, EncodeError> {
+    fn payload_length(&self, _level: ProtocolLevel) -> Result<usize, EncodeError> {
         Ok(0)
     }
 
     pub(crate) fn encode(
         &self,
         data: &mut BytesMut,
-        level: Level,
+        level: ProtocolLevel,
         max_size: usize,
     ) -> Result<(), EncodeError> {
         data.put_u8(CONNACK << 4);
@@ -341,10 +341,10 @@ impl ConnAck {
         });
 
         match level {
-            Level::V4 => {
+            ProtocolLevel::V4 => {
                 data.put_u8(Into::<ConnectReasonCodeV4>::into(self.reason_code).into());
             }
-            Level::V5 => {
+            ProtocolLevel::V5 => {
                 data.put_u8(self.reason_code.into());
                 data.write_remaining_length(self.properties.bytes_length()?)?;
                 self.properties.encode(data)?;
@@ -354,7 +354,7 @@ impl ConnAck {
         Ok(())
     }
 
-    pub(crate) fn decode(mut data: Bytes, level: Level) -> Result<Self, DecodeError> {
+    pub(crate) fn decode(mut data: Bytes, level: ProtocolLevel) -> Result<Self, DecodeError> {
         let flag = data.read_u8()?;
         if flag & 0b11111110 > 0 {
             return Err(DecodeError::MalformedPacket);
@@ -363,13 +363,13 @@ impl ConnAck {
         let n_reason_code = data.read_u8()?;
 
         let (reason_code, properties) = match level {
-            Level::V4 => {
+            ProtocolLevel::V4 => {
                 let reason_code = TryInto::<ConnectReasonCodeV4>::try_into(n_reason_code)
                     .map_err(|_| DecodeError::InvalidConnAckReasonCode(n_reason_code))?
                     .into();
                 (reason_code, ConnAckProperties::default())
             }
-            Level::V5 => {
+            ProtocolLevel::V5 => {
                 let reason_code = n_reason_code
                     .try_into()
                     .map_err(|_| DecodeError::InvalidConnAckReasonCode(n_reason_code))?;

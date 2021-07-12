@@ -1,16 +1,24 @@
-use bytes::BytesMut;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ErrorKind};
+use bytes::{Buf, BytesMut};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use crate::{DecodeError, EncodeError, Level, Packet};
+use crate::{DecodeError, EncodeError, Packet, ProtocolLevel};
+
+#[derive(Debug, Copy, Clone)]
+enum DecoderState {
+    ReadFlag,
+    ReadLength(u8),
+    ReadBody(u8, usize),
+}
 
 pub struct Codec<R, W> {
     reader: R,
     writer: W,
-    level: Level,
+    level: ProtocolLevel,
     input_max_size: usize,
     output_max_size: usize,
     read_buf: BytesMut,
     write_buf: BytesMut,
+    decoder_state: DecoderState,
 }
 
 impl<R, W> Codec<R, W>
@@ -22,11 +30,12 @@ where
         Self {
             reader,
             writer,
-            level: Level::V4,
+            level: ProtocolLevel::V4,
             input_max_size: usize::MAX,
             output_max_size: usize::MAX,
             read_buf: BytesMut::new(),
             write_buf: BytesMut::new(),
+            decoder_state: DecoderState::ReadFlag,
         }
     }
 
@@ -39,23 +48,51 @@ where
     }
 
     pub async fn decode(&mut self) -> Result<Option<(Packet, usize)>, DecodeError> {
-        let flag = match self.reader.read_u8().await {
-            Ok(flag) => flag,
-            Err(err) if err.kind() == ErrorKind::UnexpectedEof => return Ok(None),
-            Err(err) => return Err(err.into()),
-        };
-        let (len, packet_size) = read_remaining_length(&mut self.reader).await?;
-        if len > self.input_max_size {
-            return Err(DecodeError::PacketTooLarge);
-        }
-        self.read_buf.resize(len, 0);
-        self.reader.read_exact(&mut self.read_buf[..]).await?;
+        let mut data = [0; 256];
 
-        let packet = Packet::decode(self.read_buf.split().freeze(), flag, self.level)?;
-        if let Packet::Connect(connect) = &packet {
-            self.level = connect.level;
+        loop {
+            match self.decoder_state {
+                DecoderState::ReadFlag => {
+                    if !self.read_buf.is_empty() {
+                        self.decoder_state = DecoderState::ReadLength(self.read_buf[0]);
+                        self.read_buf.advance(1);
+                        continue;
+                    }
+                }
+                DecoderState::ReadLength(flag) => {
+                    if let Some((packet_size, len_size)) = get_remaining_length(&self.read_buf)? {
+                        if packet_size > self.input_max_size {
+                            return Err(DecodeError::PacketTooLarge);
+                        }
+                        self.read_buf.advance(len_size);
+                        self.decoder_state = DecoderState::ReadBody(flag, packet_size);
+                        continue;
+                    }
+                }
+                DecoderState::ReadBody(flag, packet_size) => {
+                    if self.read_buf.len() >= packet_size {
+                        let data = self.read_buf.split_to(packet_size).freeze();
+                        self.decoder_state = DecoderState::ReadFlag;
+                        let packet = Packet::decode(data, flag, self.level)?;
+                        if let Packet::Connect(connect) = &packet {
+                            self.level = connect.level;
+                        }
+                        return Ok(Some((packet, packet_size)));
+                    }
+                }
+            }
+
+            let sz = self.reader.read(&mut data).await?;
+            if sz == 0 {
+                return match self.decoder_state {
+                    DecoderState::ReadFlag => Ok(None),
+                    DecoderState::ReadLength(_) | DecoderState::ReadBody(_, _) => {
+                        Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into())
+                    }
+                };
+            }
+            self.read_buf.extend_from_slice(&data[..sz]);
         }
-        Ok(Some((packet, packet_size)))
     }
 
     pub async fn encode(&mut self, packet: &Packet) -> Result<usize, EncodeError> {
@@ -71,15 +108,17 @@ where
 }
 
 #[inline]
-async fn read_remaining_length(
-    mut reader: impl AsyncRead + Unpin,
-) -> Result<(usize, usize), DecodeError> {
+fn get_remaining_length(data: &[u8]) -> Result<Option<(usize, usize)>, DecodeError> {
     let mut n = 0;
     let mut shift = 0;
     let mut bytes = 0;
 
-    loop {
-        let byte = reader.read_u8().await?;
+    for i in 0.. {
+        if i >= data.len() {
+            return Ok(None);
+        }
+
+        let byte = data[i];
         bytes += 1;
         n += ((byte & 0x7f) as usize) << shift;
         let done = (byte & 0x80) == 0;
@@ -90,5 +129,5 @@ async fn read_remaining_length(
         ensure!(shift <= 21, DecodeError::MalformedPacket);
     }
 
-    Ok((n, bytes))
+    Ok(Some((n, bytes)))
 }
