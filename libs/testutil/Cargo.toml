@@ -10,5 +10,5 @@ service = { path = "../service", package = "rsmqtt-service" }
 serde_yaml = "0.8.17"
 serde = { version = "1.0.126", features = ["derive"] }
 futures-util = "0.3.15"
-tokio = { version = "1.8.0", features = ["sync", "time", "io-util"] }
+tokio = { version = "1.8.1", features = ["sync", "time", "io-util"] }
 bytestring = "1.0.0"

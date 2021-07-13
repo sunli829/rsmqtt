@@ -21,14 +21,14 @@ plugin-oso-acl = ["rsmqtt-plugin-oso-acl"]
 [dependencies]
 service = { path = "../../libs/service", package = "rsmqtt-service" }
 
-anyhow = "1.0.41"
-tokio = { version = "1.8.0", features = ["sync", "rt-multi-thread", "time", "macros", "net", "io-util"] }
+anyhow = "1.0.42"
+tokio = { version = "1.8.1", features = ["sync", "rt-multi-thread", "time", "macros", "net", "io-util"] }
 tracing = "0.1.26"
-tokio-stream = "0.1.6"
+tokio-stream = "0.1.7"
 bytestring = "1.0.0"
 serde_yaml = "0.8.17"
 serde = { version = "1.0.126", features = ["derive"] }
-structopt = "0.3.21"
+structopt = "0.3.22"
 tracing-subscriber = "0.2.19"
 fnv = "1.0.7"
 bytes = "1.0.1"

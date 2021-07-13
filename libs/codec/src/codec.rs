@@ -5,9 +5,9 @@ use crate::{DecodeError, EncodeError, Packet, ProtocolLevel};
 
 #[derive(Debug, Copy, Clone)]
 enum DecoderState {
-    ReadFlag,
-    ReadLength(u8),
-    ReadBody(u8, usize),
+    Flag,
+    Length(u8),
+    Body(u8, usize),
 }
 
 pub struct Codec<R, W> {
@@ -35,7 +35,7 @@ where
             output_max_size: usize::MAX,
             read_buf: BytesMut::new(),
             write_buf: BytesMut::new(),
-            decoder_state: DecoderState::ReadFlag,
+            decoder_state: DecoderState::Flag,
         }
     }
 
@@ -52,27 +52,26 @@ where
 
         loop {
             match self.decoder_state {
-                DecoderState::ReadFlag => {
+                DecoderState::Flag => {
                     if !self.read_buf.is_empty() {
-                        self.decoder_state = DecoderState::ReadLength(self.read_buf[0]);
-                        self.read_buf.advance(1);
+                        self.decoder_state = DecoderState::Length(self.read_buf.get_u8());
                         continue;
                     }
                 }
-                DecoderState::ReadLength(flag) => {
+                DecoderState::Length(flag) => {
                     if let Some((packet_size, len_size)) = get_remaining_length(&self.read_buf)? {
                         if packet_size > self.input_max_size {
                             return Err(DecodeError::PacketTooLarge);
                         }
                         self.read_buf.advance(len_size);
-                        self.decoder_state = DecoderState::ReadBody(flag, packet_size);
+                        self.decoder_state = DecoderState::Body(flag, packet_size);
                         continue;
                     }
                 }
-                DecoderState::ReadBody(flag, packet_size) => {
+                DecoderState::Body(flag, packet_size) => {
                     if self.read_buf.len() >= packet_size {
                         let data = self.read_buf.split_to(packet_size).freeze();
-                        self.decoder_state = DecoderState::ReadFlag;
+                        self.decoder_state = DecoderState::Flag;
                         let packet = Packet::decode(data, flag, self.level)?;
                         if let Packet::Connect(connect) = &packet {
                             self.level = connect.level;
@@ -85,8 +84,8 @@ where
             let sz = self.reader.read(&mut data).await?;
             if sz == 0 {
                 return match self.decoder_state {
-                    DecoderState::ReadFlag => Ok(None),
-                    DecoderState::ReadLength(_) | DecoderState::ReadBody(_, _) => {
+                    DecoderState::Flag => Ok(None),
+                    DecoderState::Length(_) | DecoderState::Body(_, _) => {
                         Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into())
                     }
                 };

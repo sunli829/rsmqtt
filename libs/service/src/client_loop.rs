@@ -174,7 +174,7 @@ where
             ));
         }
 
-        let session_expiry_interval = {
+        let mut session_expiry_interval = {
             match connect.properties.session_expiry_interval {
                 Some(session_expiry_interval)
                     if session_expiry_interval > self.state.config.max_session_expiry_interval =>
@@ -325,6 +325,7 @@ where
         if connect.level == ProtocolLevel::V4 && !connect.clean_start {
             connect.properties.session_expiry_interval =
                 Some(self.state.config.max_session_expiry_interval);
+            session_expiry_interval = self.state.config.max_session_expiry_interval;
         }
 
         {
@@ -530,9 +531,7 @@ where
 
         if retain {
             // update retained message
-            self.state
-                .storage
-                .update_retained_message(msg.topic(), msg.clone());
+            self.state.storage.update_retained_message(msg.clone());
         }
 
         for (_, plugin) in &self.state.plugins {

@@ -11,9 +11,9 @@ impl ServiceState {
             ($state:expr, $topic:literal, $payload:expr) => {
                 $state.storage.publish(std::iter::once(
                     Message::new(
-                        $topic.into(),
+                        $topic,
                         Qos::AtMostOnce,
-                        $payload.to_string().into_bytes().into(),
+                        bytes::Bytes::from($payload.to_string().into_bytes()),
                     )
                     .with_retain(true),
                 ));

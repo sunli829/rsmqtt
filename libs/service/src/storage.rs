@@ -123,7 +123,6 @@ impl Ord for TimeoutKey {
 
 #[derive(Default)]
 struct StorageInner {
-    retain_messages: HashMap<String, Message>,
     sessions: HashMap<String, RwLock<Session>>,
     filter_tree: FilterTree<String, FilterItem>,
     send_last_will_timeout: BTreeSet<TimeoutKey>,
@@ -206,12 +205,13 @@ pub struct Storage {
 
 #[allow(clippy::too_many_arguments)]
 impl Storage {
-    pub fn update_retained_message(&self, topic: &str, msg: Message) {
+    pub fn update_retained_message(&self, msg: Message) {
         let mut inner = self.inner.write();
-        if msg.is_empty() {
-            inner.retain_messages.remove(topic);
+        let topic = msg.topic().clone();
+        if !msg.is_empty() {
+            inner.filter_tree.set_retained_message(topic, Some(msg));
         } else {
-            inner.retain_messages.insert(topic.to_string(), msg);
+            inner.filter_tree.set_retained_message(topic, None);
         }
     }
 
@@ -386,36 +386,27 @@ impl Storage {
                 .is_none();
 
             // send retained messages
-            if !inner.retain_messages.is_empty() {
-                let publish_retain = matches!(
-                    (retain_handling, is_new_subscribe),
-                    (RetainHandling::OnEverySubscribe, _) | (RetainHandling::OnNewSubscribe, true)
-                );
+            let publish_retain = matches!(
+                (retain_handling, is_new_subscribe),
+                (RetainHandling::OnEverySubscribe, _) | (RetainHandling::OnNewSubscribe, true)
+            );
 
-                if publish_retain {
+            if publish_retain {
+                for msg in inner.filter_tree.matches_retained_messages(filter.path) {
+                    if msg.is_expired() {
+                        continue;
+                    }
+
+                    if filter_item.no_local && msg.from_client_id().map(|s| &**s) == Some(client_id)
+                    {
+                        // If no local is true, Application Messages MUST NOT be forwarded to a connection with
+                        // a ClientID equal to the ClientID of the publishing connection [MQTT-3.8.3-3]
+                        continue;
+                    }
+
                     if let Some(session) = inner.sessions.get(client_id) {
                         let mut session = session.write();
-
-                        let mut filter_tree = FilterTree::default();
-                        filter_tree.insert(filter.path, client_id, ());
-
-                        for msg in inner.retain_messages.values() {
-                            if msg.is_expired() {
-                                continue;
-                            }
-
-                            if filter_item.no_local
-                                && msg.from_client_id().map(|s| &**s) == Some(client_id)
-                            {
-                                // If no local is true, Application Messages MUST NOT be forwarded to a connection with
-                                // a ClientID equal to the ClientID of the publishing connection [MQTT-3.8.3-3]
-                                continue;
-                            }
-
-                            if filter_tree.is_matched(msg.topic()) {
-                                session.add_message(msg, std::iter::once(&filter_item));
-                            }
-                        }
+                        session.add_message(msg, std::iter::once(&filter_item));
                     }
                 }
             }
@@ -535,18 +526,14 @@ impl Storage {
                 .values()
                 .map(|session| session.read().inflight_pub_packets.len())
                 .sum::<usize>(),
-            retained_messages_count: inner.retain_messages.len(),
-            messages_count: inner.retain_messages.len()
+            retained_messages_count: inner.filter_tree.retained_messages_count(),
+            messages_count: inner.filter_tree.retained_messages_count()
                 + inner
                     .sessions
                     .values()
                     .map(|session| session.read().queue.len())
                     .sum::<usize>(),
-            messages_bytes: inner
-                .retain_messages
-                .values()
-                .map(|msg| msg.payload().len())
-                .sum::<usize>()
+            messages_bytes: inner.filter_tree.retained_messages_bytes()
                 + inner
                     .sessions
                     .values()
@@ -562,9 +549,9 @@ impl Storage {
             subscriptions_count: inner
                 .share_subscriptions
                 .values()
-                .map(|filter_tree| filter_tree.len())
+                .map(|filter_tree| filter_tree.subscriber_count())
                 .sum::<usize>()
-                + inner.filter_tree.len(),
+                + inner.filter_tree.subscriber_count(),
             clients_expired: inner.clients_expired,
         }
     }

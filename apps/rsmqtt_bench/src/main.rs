@@ -102,7 +102,7 @@ async fn client_loop(
     // connect
     codec
         .encode(&Packet::Connect(Connect {
-            level: ProtocolLevel::V5,
+            level: ProtocolLevel::V4,
             keep_alive: 60,
             clean_start: true,
             client_id,

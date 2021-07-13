@@ -175,17 +175,17 @@ impl MetricsCalc {
         service_metrics: &ServiceMetrics,
         storage_metrics: &StorageMetrics,
     ) -> Metrics {
-        let bytes_received = service_metrics.bytes_received.load(Ordering::Relaxed);
-        let bytes_sent = service_metrics.bytes_sent.load(Ordering::Relaxed);
-        let pub_bytes_received = service_metrics.pub_bytes_received.load(Ordering::Relaxed);
-        let pub_bytes_sent = service_metrics.pub_bytes_sent.load(Ordering::Relaxed);
-        let msgs_received = service_metrics.msgs_received.load(Ordering::Relaxed);
-        let msgs_sent = service_metrics.msgs_sent.load(Ordering::Relaxed);
-        let pub_msgs_received = service_metrics.pub_msgs_received.load(Ordering::Relaxed);
-        let pub_msgs_sent = service_metrics.pub_msgs_sent.load(Ordering::Relaxed);
-        let msgs_dropped = service_metrics.msgs_dropped.load(Ordering::Relaxed);
-        let socket_connections = service_metrics.socket_connections.load(Ordering::Relaxed);
-        let connection_count = service_metrics.connection_count.load(Ordering::Relaxed);
+        let bytes_received = service_metrics.bytes_received.load(Ordering::SeqCst);
+        let bytes_sent = service_metrics.bytes_sent.load(Ordering::SeqCst);
+        let pub_bytes_received = service_metrics.pub_bytes_received.load(Ordering::SeqCst);
+        let pub_bytes_sent = service_metrics.pub_bytes_sent.load(Ordering::SeqCst);
+        let msgs_received = service_metrics.msgs_received.load(Ordering::SeqCst);
+        let msgs_sent = service_metrics.msgs_sent.load(Ordering::SeqCst);
+        let pub_msgs_received = service_metrics.pub_msgs_received.load(Ordering::SeqCst);
+        let pub_msgs_sent = service_metrics.pub_msgs_sent.load(Ordering::SeqCst);
+        let msgs_dropped = service_metrics.msgs_dropped.load(Ordering::SeqCst);
+        let socket_connections = service_metrics.socket_connections.load(Ordering::SeqCst);
+        let connection_count = service_metrics.connection_count.load(Ordering::SeqCst);
         let StorageMetrics {
             session_count,
             inflight_messages_count,

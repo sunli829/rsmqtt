@@ -19,14 +19,14 @@ pub struct Message {
 
 impl Message {
     #[inline]
-    pub fn new(topic: ByteString, qos: Qos, payload: Bytes) -> Self {
+    pub fn new(topic: impl Into<ByteString>, qos: Qos, payload: impl Into<Bytes>) -> Self {
         Self {
             from_client_id: None,
             from_uid: None,
             created_at: SystemTime::now(),
-            topic,
+            topic: topic.into(),
             qos,
-            payload,
+            payload: payload.into(),
             retain: false,
             properties: PublishProperties::default(),
         }

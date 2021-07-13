@@ -32,67 +32,67 @@ pub struct ServiceMetrics {
 impl ServiceMetrics {
     #[inline]
     pub fn inc_bytes_received(&self, value: usize) {
-        self.bytes_received.fetch_add(value, Ordering::Relaxed);
+        self.bytes_received.fetch_add(value, Ordering::SeqCst);
     }
 
     #[inline]
     pub fn inc_bytes_sent(&self, value: usize) {
-        self.bytes_sent.fetch_add(value, Ordering::Relaxed);
+        self.bytes_sent.fetch_add(value, Ordering::SeqCst);
     }
 
     #[inline]
     pub fn inc_pub_bytes_received(&self, value: usize) {
-        self.pub_bytes_received.fetch_add(value, Ordering::Relaxed);
+        self.pub_bytes_received.fetch_add(value, Ordering::SeqCst);
     }
 
     #[inline]
     pub fn inc_pub_bytes_sent(&self, value: usize) {
-        self.pub_bytes_sent.fetch_add(value, Ordering::Relaxed);
+        self.pub_bytes_sent.fetch_add(value, Ordering::SeqCst);
     }
 
     #[inline]
     pub fn inc_msgs_received(&self, value: usize) {
-        self.msgs_received.fetch_add(value, Ordering::Relaxed);
+        self.msgs_received.fetch_add(value, Ordering::SeqCst);
     }
 
     #[inline]
     pub fn inc_msgs_sent(&self, value: usize) {
-        self.msgs_sent.fetch_add(value, Ordering::Relaxed);
+        self.msgs_sent.fetch_add(value, Ordering::SeqCst);
     }
 
     #[inline]
     pub fn inc_pub_msgs_received(&self, value: usize) {
-        self.pub_msgs_received.fetch_add(value, Ordering::Relaxed);
+        self.pub_msgs_received.fetch_add(value, Ordering::SeqCst);
     }
 
     #[inline]
     pub fn inc_pub_msgs_sent(&self, value: usize) {
-        self.pub_msgs_sent.fetch_add(value, Ordering::Relaxed);
+        self.pub_msgs_sent.fetch_add(value, Ordering::SeqCst);
     }
 
     #[inline]
     pub fn inc_msg_dropped(&self, value: usize) {
-        self.msgs_dropped.fetch_add(value, Ordering::Relaxed);
+        self.msgs_dropped.fetch_add(value, Ordering::SeqCst);
     }
 
     #[inline]
     pub fn inc_socket_connections(&self, value: usize) {
-        self.socket_connections.fetch_add(value, Ordering::Relaxed);
+        self.socket_connections.fetch_add(value, Ordering::SeqCst);
     }
 
     #[inline]
     pub fn dec_socket_connections(&self, value: usize) {
-        self.socket_connections.fetch_sub(value, Ordering::Relaxed);
+        self.socket_connections.fetch_sub(value, Ordering::SeqCst);
     }
 
     #[inline]
     pub fn inc_connection_count(&self, value: usize) {
-        self.connection_count.fetch_add(value, Ordering::Relaxed);
+        self.connection_count.fetch_add(value, Ordering::SeqCst);
     }
 
     #[inline]
     pub fn dec_connection_count(&self, value: usize) {
-        self.connection_count.fetch_sub(value, Ordering::Relaxed);
+        self.connection_count.fetch_sub(value, Ordering::SeqCst);
     }
 }
 

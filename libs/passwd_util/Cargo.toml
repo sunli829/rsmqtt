@@ -4,7 +4,7 @@ version = "0.3.0"
 edition = "2018"
 
 [dependencies]
-anyhow = "1.0.41"
+anyhow = "1.0.42"
 argon2 = "0.2.1"
 password-hash = "0.2.1"
 pbkdf2 = "0.8.0"

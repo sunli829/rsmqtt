@@ -162,10 +162,17 @@ impl SubAck {
         data.write_remaining_length(size)?;
 
         data.put_u16(self.packet_id.get());
-        data.write_remaining_length(self.properties.bytes_length()?)?;
-        self.properties.encode(data)?;
+
+        if level == ProtocolLevel::V5 {
+            data.write_remaining_length(self.properties.bytes_length()?)?;
+            self.properties.encode(data)?;
+        }
+
         for code in self.reason_codes.iter().copied() {
-            data.put_u8(code.into());
+            match level {
+                ProtocolLevel::V4 => data.put_u8(Into::<SubscribeReasonCodeV4>::into(code).into()),
+                ProtocolLevel::V5 => data.put_u8(code.into()),
+            }
         }
         Ok(())
     }
