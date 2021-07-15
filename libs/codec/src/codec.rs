@@ -39,10 +39,17 @@ where
         }
     }
 
+    #[inline]
+    pub fn protocol_level(&self) -> ProtocolLevel {
+        self.level
+    }
+
+    #[inline]
     pub fn set_input_max_size(&mut self, size: usize) {
         self.input_max_size = size;
     }
 
+    #[inline]
     pub fn set_output_max_size(&mut self, size: usize) {
         self.output_max_size = size;
     }

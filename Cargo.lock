@@ -1539,6 +1539,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsmqtt-client"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "bytestring",
+ "fnv",
+ "rsmqtt-codec",
+ "thiserror",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+]
+
+[[package]]
 name = "rsmqtt-codec"
 version = "0.3.0"
 dependencies = [
@@ -1635,9 +1649,10 @@ dependencies = [
  "bytes",
  "bytesize",
  "bytestring",
- "rsmqtt-codec",
+ "rsmqtt-client",
  "structopt",
  "tokio",
+ "tokio-stream",
 ]
 
 [[package]]

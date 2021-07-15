@@ -133,7 +133,7 @@ impl WillProperties {
     }
 }
 
-#[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ConnectProperties {
     pub session_expiry_interval: Option<u32>,
     pub receive_max: Option<u16>,
@@ -261,7 +261,7 @@ impl ConnectProperties {
 }
 
 /// Connection Request
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Connect {
     pub level: ProtocolLevel,
     #[serde(default = "default_keep_alive")]

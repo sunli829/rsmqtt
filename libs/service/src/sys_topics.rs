@@ -9,7 +9,7 @@ impl ServiceState {
 
         macro_rules! update {
             ($state:expr, $topic:literal, $payload:expr) => {
-                $state.storage.publish(std::iter::once(
+                $state.storage.deliver(std::iter::once(
                     Message::new(
                         $topic,
                         Qos::AtMostOnce,

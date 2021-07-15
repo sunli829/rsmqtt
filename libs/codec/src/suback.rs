@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::packet::SUBACK;
 use crate::reader::PacketReader;
 use crate::writer::{bytes_remaining_length, PacketWriter};
-use crate::{property, DecodeError, EncodeError, ProtocolLevel};
+use crate::{property, DecodeError, EncodeError, ProtocolLevel, Qos};
 
 #[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct SubAckProperties {
@@ -91,6 +91,16 @@ impl SubscribeReasonCode {
     #[inline]
     pub fn is_success(&self) -> bool {
         Into::<u8>::into(*self) < 0x80
+    }
+
+    #[inline]
+    pub fn qos(&self) -> Option<Qos> {
+        match self {
+            SubscribeReasonCode::QoS0 => Some(Qos::AtMostOnce),
+            SubscribeReasonCode::QoS1 => Some(Qos::AtLeastOnce),
+            SubscribeReasonCode::QoS2 => Some(Qos::ExactlyOnce),
+            _ => None,
+        }
     }
 }
 

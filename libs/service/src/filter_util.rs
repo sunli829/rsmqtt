@@ -11,7 +11,7 @@ pub fn has_wildcards(filter: &str) -> bool {
     filter.contains(&['+', '#'][..])
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub struct Filter<'a> {
     pub share_name: Option<&'a str>,
     pub path: &'a str,
@@ -43,6 +43,9 @@ pub fn parse_filter(filter: &str) -> Option<Filter> {
             return None;
         }
         let (share_name, path) = tail.split_once('/')?;
+        if has_wildcards(share_name) {
+            return None;
+        }
         if !valid_filter(path) {
             return None;
         }

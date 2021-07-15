@@ -1,21 +1,23 @@
-use std::borrow::Borrow;
 use std::collections::HashMap;
-use std::hash::Hash;
 use std::iter::Peekable;
 use std::str::Split;
 
+use indexmap::IndexMap;
+
+use crate::filter_util::Filter;
+use crate::storage::FilterItem;
 use crate::Message;
 
 #[derive(Debug)]
-struct Node<K, D> {
-    hash_child: Option<Box<Node<K, D>>>,
-    plus_child: Option<Box<Node<K, D>>>,
-    named_children: HashMap<String, Node<K, D>>,
-    data: HashMap<K, D>,
+struct Node {
+    hash_child: Option<Box<Node>>,
+    plus_child: Option<Box<Node>>,
+    named_children: HashMap<String, Node>,
+    data: HashMap<String, FilterItem>,
     retained_message: Option<Message>,
 }
 
-impl<K, D> Node<K, D> {
+impl Node {
     #[inline]
     fn is_empty(&self) -> bool {
         self.hash_child.is_none()
@@ -26,7 +28,7 @@ impl<K, D> Node<K, D> {
     }
 }
 
-impl<K, D> Default for Node<K, D> {
+impl Default for Node {
     fn default() -> Self {
         Self {
             hash_child: None,
@@ -38,17 +40,19 @@ impl<K, D> Default for Node<K, D> {
     }
 }
 
-pub struct FilterTree<K, D> {
-    root: Node<K, D>,
+pub struct Trie {
+    root: Node,
+    share_subscriptions: HashMap<String, Node>,
     subscribers_count: usize,
     retained_messages_count: usize,
     retained_messages_bytes: usize,
 }
 
-impl<K, D> Default for FilterTree<K, D> {
+impl Default for Trie {
     fn default() -> Self {
         Self {
             root: Node::default(),
+            share_subscriptions: HashMap::new(),
             subscribers_count: 0,
             retained_messages_count: 0,
             retained_messages_bytes: 0,
@@ -56,13 +60,13 @@ impl<K, D> Default for FilterTree<K, D> {
     }
 }
 
-impl<K: Eq + Hash, D> FilterTree<K, D> {
-    fn internal_insert(
+impl Trie {
+    fn internal_subscribe(
         mut segments: Peekable<Split<char>>,
-        parent_node: &mut Node<K, D>,
-        key: K,
-        data: D,
-    ) -> Option<D> {
+        parent_node: &mut Node,
+        client_id: String,
+        data: FilterItem,
+    ) -> Option<FilterItem> {
         let segment = segments.next().unwrap();
         let is_end = segments.peek().is_none();
 
@@ -80,27 +84,37 @@ impl<K: Eq + Hash, D> FilterTree<K, D> {
         };
 
         if is_end {
-            node.data.insert(key, data)
+            node.data.insert(client_id.to_string(), data)
         } else {
-            Self::internal_insert(segments, node, key, data)
+            Self::internal_subscribe(segments, node, client_id, data)
         }
     }
 
-    pub fn insert(&mut self, filter: impl AsRef<str>, key: K, data: D) -> Option<D> {
-        let mut segments = filter.as_ref().split('/').peekable();
-        assert!(segments.peek().is_some());
-        let res = Self::internal_insert(segments, &mut self.root, key, data);
+    pub fn subscribe(
+        &mut self,
+        filter: Filter<'_>,
+        client_id: impl Into<String>,
+        data: FilterItem,
+    ) -> Option<FilterItem> {
+        let segments = filter.path.split('/').peekable();
+        let res = match filter.share_name {
+            Some(share_name) => Self::internal_subscribe(
+                segments,
+                self.share_subscriptions
+                    .entry(share_name.to_string())
+                    .or_default(),
+                client_id.into(),
+                data,
+            ),
+            None => Self::internal_subscribe(segments, &mut self.root, client_id.into(), data),
+        };
         if res.is_none() {
             self.subscribers_count += 1;
         }
         res
     }
 
-    fn internal_matches<'a>(
-        parent_node: &'a Node<K, D>,
-        nodes: &mut Vec<&'a Node<K, D>>,
-        segments: &[&str],
-    ) {
+    fn internal_matches<'a>(parent_node: &'a Node, nodes: &mut Vec<&'a Node>, segments: &[&str]) {
         let (segment, tail) = segments.split_first().unwrap();
         let is_end = tail.is_empty();
 
@@ -119,23 +133,59 @@ impl<K: Eq + Hash, D> FilterTree<K, D> {
         }
     }
 
-    pub fn matches(&self, topic: impl AsRef<str>) -> impl Iterator<Item = (&K, &D)> {
-        let mut nodes = Vec::new();
+    pub fn matches(
+        &self,
+        topic: impl AsRef<str>,
+    ) -> impl Iterator<Item = (&str, Vec<&FilterItem>)> {
         let segments = topic.as_ref().split('/').collect::<Vec<_>>();
         assert!(!segments.is_empty());
+
+        let mut matched: HashMap<&str, Vec<&FilterItem>> = HashMap::new();
+
+        let mut nodes = Vec::new();
         Self::internal_matches(&self.root, &mut nodes, &segments[..]);
-        nodes.into_iter().map(|node| node.data.iter()).flatten()
+        for (k, item) in nodes.iter().map(|node| node.data.iter()).flatten() {
+            matched.entry(k).or_default().push(item);
+        }
+
+        matched.into_iter()
     }
 
-    fn internal_remove<Q: ?Sized>(
+    pub fn matches_shared(
+        &self,
+        topic: impl AsRef<str>,
+    ) -> impl Iterator<Item = (&str, Vec<&FilterItem>)> {
+        let segments = topic.as_ref().split('/').collect::<Vec<_>>();
+        assert!(!segments.is_empty());
+
+        let mut nodes = Vec::new();
+        let mut matched: HashMap<&str, Vec<&FilterItem>> = HashMap::new();
+
+        for node in self.share_subscriptions.values() {
+            let mut share_matches: IndexMap<&str, Vec<&FilterItem>> = IndexMap::new();
+
+            nodes.clear();
+            Self::internal_matches(node, &mut nodes, &segments[..]);
+            for (k, item) in nodes.iter().map(|node| node.data.iter()).flatten() {
+                share_matches.entry(k).or_default().push(item);
+            }
+
+            if !share_matches.is_empty() {
+                let (k, items) = share_matches
+                    .swap_remove_index(fastrand::usize(0..share_matches.len()))
+                    .unwrap();
+                matched.entry(k).or_default().extend(items);
+            }
+        }
+
+        matched.into_iter()
+    }
+
+    fn internal_unsubscribe(
         mut segments: Peekable<Split<char>>,
-        parent_node: &mut Node<K, D>,
-        key: &Q,
-    ) -> Option<D>
-    where
-        K: Borrow<Q>,
-        Q: Hash + Eq,
-    {
+        parent_node: &mut Node,
+        client_id: &str,
+    ) -> Option<FilterItem> {
         let segment = segments.next().unwrap();
         let is_end = segments.peek().is_none();
 
@@ -146,9 +196,9 @@ impl<K: Eq + Hash, D> FilterTree<K, D> {
         }?;
 
         let res = if is_end {
-            node.data.remove(key)
+            node.data.remove(client_id)
         } else {
-            Self::internal_remove(segments, node, key)
+            Self::internal_unsubscribe(segments, node, client_id)
         };
 
         if node.is_empty() {
@@ -164,46 +214,46 @@ impl<K: Eq + Hash, D> FilterTree<K, D> {
         res
     }
 
-    pub fn remove<Q: ?Sized>(&mut self, filter: impl AsRef<str>, key: &Q) -> Option<D>
-    where
-        K: Borrow<Q>,
-        Q: Hash + Eq,
-    {
-        let mut segments = filter.as_ref().split('/').peekable();
-        assert!(segments.peek().is_some());
-        let res = Self::internal_remove(segments, &mut self.root, key);
+    pub fn unsubscribe(&mut self, filter: Filter<'_>, client_id: &str) -> Option<FilterItem> {
+        let segments = filter.path.split('/').peekable();
+        let res = match filter.share_name {
+            Some(share_name) => Self::internal_unsubscribe(
+                segments,
+                self.share_subscriptions
+                    .entry(share_name.to_string())
+                    .or_default(),
+                client_id,
+            ),
+            None => Self::internal_unsubscribe(segments, &mut self.root, client_id),
+        };
         if res.is_some() {
             self.subscribers_count -= 1;
         }
         res
     }
 
-    fn internal_remove_all<Q: ?Sized>(parent_node: &mut Node<K, D>, key: &Q) -> usize
-    where
-        K: Borrow<Q>,
-        Q: Hash + Eq,
-    {
+    fn internal_unsubscribe_all(parent_node: &mut Node, client_id: &str) -> usize {
         let mut remove_count = 0;
 
-        if parent_node.data.remove(key).is_some() {
+        if parent_node.data.remove(client_id).is_some() {
             remove_count += 1;
         }
 
         if let Some(hash_node) = &mut parent_node.hash_child {
-            if hash_node.data.remove(key).is_some() {
+            if hash_node.data.remove(client_id).is_some() {
                 remove_count += 1;
             }
-            remove_count += Self::internal_remove_all(hash_node, key);
+            remove_count += Self::internal_unsubscribe_all(hash_node, client_id);
             if hash_node.is_empty() {
                 parent_node.hash_child = None;
             }
         }
 
         if let Some(plus_node) = &mut parent_node.plus_child {
-            if plus_node.data.remove(key).is_some() {
+            if plus_node.data.remove(client_id).is_some() {
                 remove_count += 1;
             }
-            remove_count += Self::internal_remove_all(plus_node, key);
+            remove_count += Self::internal_unsubscribe_all(plus_node, client_id);
             if plus_node.is_empty() {
                 parent_node.plus_child = None;
             }
@@ -211,10 +261,10 @@ impl<K: Eq + Hash, D> FilterTree<K, D> {
 
         let mut remove_named = Vec::new();
         for (name, node) in &mut parent_node.named_children {
-            if node.data.remove(key).is_some() {
+            if node.data.remove(client_id).is_some() {
                 remove_count += 1;
             }
-            remove_count += Self::internal_remove_all(node, key);
+            remove_count += Self::internal_unsubscribe_all(node, client_id);
             if node.is_empty() {
                 remove_named.push(name.to_string());
             }
@@ -227,17 +277,16 @@ impl<K: Eq + Hash, D> FilterTree<K, D> {
         remove_count
     }
 
-    pub fn remove_all<Q: ?Sized>(&mut self, key: &Q)
-    where
-        K: Borrow<Q>,
-        Q: Hash + Eq,
-    {
-        let count = Self::internal_remove_all(&mut self.root, key);
+    pub fn unsubscribe_all(&mut self, client_id: &str) {
+        let mut count = Self::internal_unsubscribe_all(&mut self.root, client_id);
+        for node in self.share_subscriptions.values_mut() {
+            count += Self::internal_unsubscribe_all(node, client_id);
+        }
         self.subscribers_count -= count;
     }
 
     fn internal_matches_retained_messages_all<'a>(
-        parent_node: &'a Node<K, D>,
+        parent_node: &'a Node,
         msgs: &mut Vec<&'a Message>,
     ) {
         if let Some(msg) = &parent_node.retained_message {
@@ -249,7 +298,7 @@ impl<K: Eq + Hash, D> FilterTree<K, D> {
     }
 
     fn internal_matches_retained_messages<'a>(
-        parent_node: &'a Node<K, D>,
+        parent_node: &'a Node,
         msgs: &mut Vec<&'a Message>,
         segments: &[&str],
     ) {
@@ -292,15 +341,11 @@ impl<K: Eq + Hash, D> FilterTree<K, D> {
         msgs.into_iter()
     }
 
-    fn internal_set_retained_message<Q: ?Sized>(
+    fn internal_set_retained_message(
         mut segments: Peekable<Split<char>>,
-        parent_node: &mut Node<K, D>,
+        parent_node: &mut Node,
         retained_message: Option<Message>,
-    ) -> Option<Message>
-    where
-        K: Borrow<Q>,
-        Q: Hash + Eq,
-    {
+    ) -> Option<Message> {
         let segment = segments.next().unwrap();
         let is_end = segments.peek().is_none();
         let is_delete = retained_message.is_none();
@@ -371,11 +416,33 @@ impl<K: Eq + Hash, D> FilterTree<K, D> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::filter_util::parse_filter;
     use codec::Qos;
+    use std::convert::TryInto;
+
+    macro_rules! item {
+        ($id: expr) => {
+            FilterItem {
+                qos: Qos::AtMostOnce,
+                no_local: false,
+                retain_as_published: false,
+                retain_handling: codec::RetainHandling::OnEverySubscribe,
+                id: Some($id.try_into().unwrap()),
+            }
+        };
+    }
 
     macro_rules! do_matches {
         ($tree:expr, $topic:expr) => {{
-            let mut res = $tree.matches($topic).collect::<Vec<_>>();
+            let mut res = $tree
+                .matches($topic)
+                .map(|(key, items)| {
+                    items
+                        .into_iter()
+                        .map(move |item| (key, item.id.unwrap().get()))
+                })
+                .flatten()
+                .collect::<Vec<_>>();
             res.sort_by(|a, b| a.0.cmp(&b.0));
             res
         }};
@@ -394,79 +461,97 @@ mod tests {
 
     #[test]
     fn test_matches() {
-        let mut tree = FilterTree::default();
+        let mut tree = Trie::default();
 
-        tree.insert("a/b/c", 1, 1);
-        tree.insert("a/+/c", 2, 1);
-        tree.insert("d/+", 1, 2);
-        tree.insert("#", 3, 1);
-        tree.insert("a/#", 4, 1);
+        tree.subscribe(parse_filter("a/b/c").unwrap(), "1", item!(1));
+        tree.subscribe(parse_filter("a/+/c").unwrap(), "2", item!(1));
+        tree.subscribe(parse_filter("d/+").unwrap(), "1", item!(2));
+        tree.subscribe(parse_filter("#").unwrap(), "3", item!(1));
+        tree.subscribe(parse_filter("a/#").unwrap(), "4", item!(1));
 
         assert_eq!(tree.subscriber_count(), 5);
 
         assert_eq!(
             do_matches!(tree, "a/b/c"),
-            vec![(&1, &1), (&2, &1), (&3, &1), (&4, &1)]
+            vec![("1", 1), ("2", 1), ("3", 1), ("4", 1)]
         );
-        assert_eq!(do_matches!(tree, "d/1"), vec![(&1, &2), (&3, &1)]);
-        assert_eq!(do_matches!(tree, "d/1/1"), vec![(&3, &1)]);
-        assert_eq!(do_matches!(tree, "a/1"), vec![(&3, &1), (&4, &1)]);
+        assert_eq!(do_matches!(tree, "d/1"), vec![("1", 2), ("3", 1)]);
+        assert_eq!(do_matches!(tree, "d/1/1"), vec![("3", 1)]);
+        assert_eq!(do_matches!(tree, "a/1"), vec![("3", 1), ("4", 1)]);
     }
 
     #[test]
     fn test_remove() {
-        let mut tree = FilterTree::default();
+        let mut tree = Trie::default();
 
-        tree.insert("a/b/c", 1, 1);
-        tree.insert("a/b", 2, 1);
+        tree.subscribe(parse_filter("a/b/c").unwrap(), "1", item!(1));
+        tree.subscribe(parse_filter("a/b").unwrap(), "2", item!(1));
         assert_eq!(tree.subscriber_count(), 2);
 
-        assert_eq!(tree.remove("a/b", &2), Some(1));
+        assert_eq!(
+            tree.unsubscribe(parse_filter("a/b").unwrap(), "2"),
+            Some(item!(1))
+        );
         assert_eq!(tree.subscriber_count(), 1);
         assert!(!tree.root.named_children.is_empty());
 
-        assert_eq!(tree.remove("a/b/c", &1), Some(1));
+        assert_eq!(
+            tree.unsubscribe(parse_filter("a/b/c").unwrap(), "1"),
+            Some(item!(1))
+        );
         assert_eq!(tree.subscriber_count(), 0);
 
         assert!(tree.root.named_children.is_empty());
 
-        tree.insert("a/+/c", 1, 1);
-        tree.insert("a/b/c", 2, 1);
+        tree.subscribe(parse_filter("a/+/c").unwrap(), "1", item!(1));
+        tree.subscribe(parse_filter("a/b/c").unwrap(), "2", item!(1));
         assert_eq!(tree.subscriber_count(), 2);
-        assert_eq!(tree.remove("a/+/c", &1), Some(1));
-        assert_eq!(tree.remove("a/b/c", &2), Some(1));
+        assert_eq!(
+            tree.unsubscribe(parse_filter("a/+/c").unwrap(), "1"),
+            Some(item!(1))
+        );
+        assert_eq!(
+            tree.unsubscribe(parse_filter("a/b/c").unwrap(), "2"),
+            Some(item!(1))
+        );
         assert_eq!(tree.subscriber_count(), 0);
         assert!(tree.root.named_children.is_empty());
 
-        tree.insert("a/#", 1, 1);
-        tree.insert("a", 2, 1);
+        tree.subscribe(parse_filter("a/#").unwrap(), "1", item!(1));
+        tree.subscribe(parse_filter("a").unwrap(), "2", item!(1));
         assert_eq!(tree.subscriber_count(), 2);
-        assert_eq!(tree.remove("a/#", &1), Some(1));
-        assert_eq!(tree.remove("a", &2), Some(1));
+        assert_eq!(
+            tree.unsubscribe(parse_filter("a/#").unwrap(), "1"),
+            Some(item!(1))
+        );
+        assert_eq!(
+            tree.unsubscribe(parse_filter("a").unwrap(), "2"),
+            Some(item!(1))
+        );
         assert_eq!(tree.subscriber_count(), 0);
         assert!(tree.root.named_children.is_empty());
     }
 
     #[test]
     fn test_remove_all() {
-        let mut tree = FilterTree::default();
+        let mut tree = Trie::default();
 
-        tree.insert("a/b/c", 1, 1);
-        tree.insert("a/+/c", 2, 1);
-        tree.insert("d/+", 1, 2);
-        tree.insert("#", 3, 1);
-        tree.insert("a/#", 4, 1);
+        tree.subscribe(parse_filter("a/b/c").unwrap(), "1", item!(1));
+        tree.subscribe(parse_filter("a/+/c").unwrap(), "2", item!(1));
+        tree.subscribe(parse_filter("d/+").unwrap(), "1", item!(2));
+        tree.subscribe(parse_filter("#").unwrap(), "3", item!(1));
+        tree.subscribe(parse_filter("a/#").unwrap(), "4", item!(1));
 
-        tree.remove_all(&1);
+        tree.unsubscribe_all("1");
         assert_eq!(tree.subscriber_count(), 3);
 
-        tree.remove_all(&2);
+        tree.unsubscribe_all("2");
         assert_eq!(tree.subscriber_count(), 2);
 
-        tree.remove_all(&3);
+        tree.unsubscribe_all("3");
         assert_eq!(tree.subscriber_count(), 1);
 
-        tree.remove_all(&4);
+        tree.unsubscribe_all("4");
         assert_eq!(tree.subscriber_count(), 0);
 
         assert!(tree.root.is_empty());
@@ -474,7 +559,7 @@ mod tests {
 
     #[test]
     fn test_retained_messages() {
-        let mut tree = FilterTree::<i32, i32>::default();
+        let mut tree = Trie::default();
 
         tree.set_retained_message(
             "a/b/c",

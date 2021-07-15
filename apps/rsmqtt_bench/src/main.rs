@@ -1,21 +1,18 @@
 #![forbid(unsafe_code)]
 #![warn(clippy::default_trait_access)]
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::Result;
 use bytes::Bytes;
 use bytesize::ByteSize;
 use bytestring::ByteString;
-use codec::{
-    Codec, Connect, ConnectProperties, ConnectReasonCode, Packet, PacketIdAllocator, ProtocolLevel,
-    PubAck, PubAckProperties, PubAckReasonCode, Publish, PublishProperties, Qos, RetainHandling,
-    Subscribe, SubscribeFilter, SubscribeProperties,
-};
+use client::{Client, FilterBuilder, Qos};
 use structopt::StructOpt;
-use tokio::net::TcpStream;
 use tokio::sync::Barrier;
+use tokio_stream::StreamExt;
 
 #[derive(StructOpt)]
 struct Options {
@@ -67,10 +64,15 @@ async fn main() {
 
     println!("connected");
 
-    let mut count = 0;
+    let mut send_count = 0;
+    let mut recv_count = 0;
+
     for handle in handles {
         match handle.await.unwrap() {
-            Ok(res) => count += res,
+            Ok(res) => {
+                send_count += res.0;
+                recv_count += res.1;
+            }
             Err(err) => {
                 println!("error: {}", err);
                 break;
@@ -78,10 +80,17 @@ async fn main() {
         }
     }
 
-    println!("TPS: {:.3}", count as f64 / options.duration as f64);
+    println!(
+        "Send TPS: {:.3}",
+        send_count as f64 / options.duration as f64
+    );
+    println!(
+        "Receive TPS: {:.3}",
+        recv_count as f64 / options.duration as f64
+    );
     println!(
         "Transferred Bytes: {}",
-        ByteSize::b((count * options.payload_size) as u64)
+        ByteSize::b(((send_count + recv_count) * options.payload_size) as u64)
     );
 }
 
@@ -91,115 +100,59 @@ async fn client_loop(
     addr: (String, u16),
     payload: Bytes,
     duration: usize,
-) -> Result<usize> {
-    let mut stream = TcpStream::connect(addr).await?;
-    let (reader, writer) = stream.split();
-    let mut codec = Codec::new(reader, writer);
-    let client_id = format!("client{}", id).into();
+) -> Result<(usize, usize)> {
+    let (client, mut receiver) = Client::new(addr)
+        .client_id(format!("client{}", id))
+        .clean_start()
+        .build()
+        .await
+        .unwrap();
     let topic: ByteString = format!("client{}", id).into();
-    let mut packet_id_allocator = PacketIdAllocator::default();
-
-    // connect
-    codec
-        .encode(&Packet::Connect(Connect {
-            level: ProtocolLevel::V4,
-            keep_alive: 60,
-            clean_start: true,
-            client_id,
-            last_will: None,
-            login: None,
-            properties: ConnectProperties::default(),
-        }))
-        .await?;
-
-    let (packet, _) = codec
-        .decode()
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("protocol error"))?;
-    let conn_ack = match packet {
-        Packet::ConnAck(conn_ack) => conn_ack,
-        _ => anyhow::bail!("protocol error"),
-    };
-
-    anyhow::ensure!(
-        conn_ack.reason_code == ConnectReasonCode::Success,
-        "failed to connect to mqtt server: {:?}",
-        conn_ack.reason_code
-    );
-
-    codec
-        .encode(&Packet::Subscribe(Subscribe {
-            packet_id: packet_id_allocator.take(),
-            properties: SubscribeProperties::default(),
-            filters: vec![SubscribeFilter {
-                path: topic.clone(),
-                qos: Qos::AtLeastOnce,
-                no_local: false,
-                retain_as_published: false,
-                retain_handling: RetainHandling::OnEverySubscribe,
-            }],
-        }))
-        .await?;
-
-    let (packet, _) = codec
-        .decode()
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("protocol error"))?;
-    match packet {
-        Packet::SubAck(_) => {}
-        _ => anyhow::bail!("protocol error"),
-    };
+    client
+        .subscribe()
+        .filter(FilterBuilder::new(topic.clone()))
+        .send()
+        .await
+        .unwrap();
 
     barrier.wait().await;
 
-    let start_time = Instant::now();
-    let mut count = 0;
+    let send_count = Arc::new(AtomicUsize::default());
+    let recv_count = Arc::new(AtomicUsize::default());
 
-    loop {
-        if start_time.elapsed() > Duration::from_secs(duration as u64) {
-            break;
+    let timeout = tokio::time::sleep(Duration::from_secs(duration as u64));
+    let publish_task = {
+        let send_count = send_count.clone();
+        async move {
+            loop {
+                client
+                    .publish(topic.clone())
+                    .qos(Qos::ExactlyOnce)
+                    .payload(payload.clone())
+                    .send()
+                    .await
+                    .unwrap();
+                send_count.fetch_add(1, Ordering::SeqCst);
+            }
         }
+    };
+    let receive_task = {
+        let recv_count = recv_count.clone();
+        async move {
+            while let Some(_) = receiver.next().await {
+                recv_count.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    };
 
-        codec
-            .encode(&Packet::Publish(Publish {
-                dup: false,
-                qos: Qos::AtLeastOnce,
-                retain: false,
-                topic: topic.clone(),
-                packet_id: Some(packet_id_allocator.take()),
-                properties: PublishProperties::default(),
-                payload: payload.clone(),
-            }))
-            .await?;
-
-        let (packet, _) = codec
-            .decode()
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("protocol error"))?;
-        match packet {
-            Packet::PubAck(_) => {}
-            _ => anyhow::bail!("protocol error"),
-        };
-
-        let (packet, _) = codec
-            .decode()
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("protocol error"))?;
-        let id = match packet {
-            Packet::Publish(publish) => publish.packet_id.unwrap(),
-            _ => anyhow::bail!("protocol error"),
-        };
-
-        codec
-            .encode(&Packet::PubAck(PubAck {
-                packet_id: id,
-                reason_code: PubAckReasonCode::Success,
-                properties: PubAckProperties::default(),
-            }))
-            .await?;
-
-        count += 1;
+    tokio::select! {
+        _ = timeout => {}
+        _ = publish_task => {}
+        _ = receive_task => {}
     }
 
-    Ok(count)
+    Ok((
+        send_count.load(Ordering::SeqCst),
+        recv_count.load(Ordering::SeqCst),
+    ))
 }

@@ -4,7 +4,6 @@
 mod client_loop;
 mod config;
 mod error;
-mod filter_tree;
 mod filter_util;
 mod message;
 mod metrics;
@@ -12,6 +11,7 @@ mod rewrite;
 mod state;
 mod storage;
 mod sys_topics;
+mod trie;
 
 pub mod plugin;
 

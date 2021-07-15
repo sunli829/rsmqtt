@@ -4,6 +4,7 @@ members = [
     "libs/service",
     "libs/testutil",
     "libs/passwd_util",
+    "libs/client",
 
     "libs/plugins/basic-auth",
     "libs/plugins/oso-acl",

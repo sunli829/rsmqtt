@@ -5,7 +5,7 @@ edition = "2018"
 license = "GPL-3.0"
 
 [dependencies]
-codec = { path = "../../libs/codec", package = "rsmqtt-codec" }
+client = { path = "../../libs/client", package = "rsmqtt-client" }
 
 anyhow = "1.0.42"
 bytes = "1.0.1"
@@ -13,3 +13,4 @@ structopt = "0.3.22"
 tokio = { version = "1.8.1", features = ["rt-multi-thread", "net", "macros", "sync"] }
 bytestring = "1.0.0"
 bytesize = "1.0.1"
+tokio-stream = "0.1.7"

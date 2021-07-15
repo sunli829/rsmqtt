@@ -32,8 +32,10 @@ step:
         type: pubrel
         packet_id: 1
         reason_code: PacketIdentifierNotFound
+    - type: send
+      packet:
+        type: pingreq
     - type: recv
       packet:
-        type: pubcomp
-        packet_id: 1
-        reason_code: PacketIdentifierNotFound
+        type: pingresp
+

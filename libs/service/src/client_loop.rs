@@ -69,6 +69,7 @@ pub struct Connection<R, W> {
     last_will: Option<LastWill>,
     packet_id_allocator: PacketIdAllocator,
     inflight_qos2_messages: FnvHashMap<NonZeroU16, Qos2State>,
+    uncompleted_messages: FnvHashMap<NonZeroU16, Message>,
 }
 
 impl<R, W> Connection<R, W>
@@ -550,10 +551,10 @@ where
         // do publish
         match msg.qos() {
             Qos::AtMostOnce => {
-                self.state.storage.publish(std::iter::once(msg));
+                self.state.storage.deliver(std::iter::once(msg));
             }
             Qos::AtLeastOnce => {
-                self.state.storage.publish(std::iter::once(msg));
+                self.state.storage.deliver(std::iter::once(msg));
                 self.send_packet(&Packet::PubAck(PubAck {
                     packet_id: packet_id.unwrap(),
                     reason_code: PubAckReasonCode::Success,
@@ -569,26 +570,35 @@ where
                     ));
                 }
 
-                if self.state.storage.add_uncompleted_message(
-                    &client_id,
-                    packet_id.unwrap(),
-                    msg.clone(),
-                ) {
-                    self.receive_in_quota -= 1;
-                    self.send_packet(&Packet::PubRec(PubRec {
-                        packet_id: packet_id.unwrap(),
-                        reason_code: PubRecReasonCode::Success,
-                        properties: PubRecProperties::default(),
-                    }))
-                    .await?;
-                } else {
-                    self.send_packet(&Packet::PubRec(PubRec {
-                        packet_id: packet_id.unwrap(),
-                        reason_code: PubRecReasonCode::PacketIdentifierInUse,
-                        properties: PubRecProperties::default(),
-                    }))
-                    .await?;
+                let packet_id = packet_id.unwrap();
+
+                if self
+                    .uncompleted_messages
+                    .insert(packet_id, msg.clone())
+                    .is_some()
+                {
+                    return if self.codec.protocol_level() == ProtocolLevel::V5 {
+                        self.send_packet(&Packet::PubRec(PubRec {
+                            packet_id,
+                            reason_code: PubRecReasonCode::PacketIdentifierInUse,
+                            properties: PubRecProperties::default(),
+                        }))
+                        .await?;
+                        Ok(())
+                    } else {
+                        Err(Error::server_disconnect(
+                            DisconnectReasonCode::ProtocolError,
+                        ))
+                    };
                 }
+
+                self.receive_in_quota -= 1;
+                self.send_packet(&Packet::PubRec(PubRec {
+                    packet_id,
+                    reason_code: PubRecReasonCode::Success,
+                    properties: PubRecProperties::default(),
+                }))
+                .await?;
             }
         }
 
@@ -679,50 +689,58 @@ where
                 .await?;
                 Ok(())
             }
-            None => Err(Error::server_disconnect(
-                DisconnectReasonCode::ProtocolError,
-            )),
+            None => {
+                if self.codec.protocol_level() == ProtocolLevel::V5 {
+                    self.send_packet(&Packet::PubRel(PubRel {
+                        packet_id: pub_rec.packet_id,
+                        reason_code: PubRelReasonCode::PacketIdentifierNotFound,
+                        properties: PubRelProperties::default(),
+                    }))
+                    .await
+                } else {
+                    Err(Error::server_disconnect(
+                        DisconnectReasonCode::ProtocolError,
+                    ))
+                }
+            }
         }
     }
 
     async fn handle_pub_rel(&mut self, pub_rel: PubRel) -> Result<(), Error> {
-        let client_id = match &self.client_id {
-            Some(client_id) => client_id,
-            None => {
-                return Err(Error::server_disconnect(
-                    DisconnectReasonCode::ProtocolError,
-                ))
-            }
-        };
+        if self.client_id.is_none() {
+            return Err(Error::server_disconnect(
+                DisconnectReasonCode::ProtocolError,
+            ));
+        }
 
-        match self
-            .state
-            .storage
-            .remove_uncompleted_message(client_id, pub_rel.packet_id)
-        {
+        match self.uncompleted_messages.remove(&pub_rel.packet_id) {
             Some(msg) => {
-                self.state.storage.publish(std::iter::once(msg));
+                if !pub_rel.reason_code.is_success() {
+                    return Ok(());
+                }
+
+                self.state.storage.deliver(std::iter::once(msg));
                 self.send_packet(&Packet::PubComp(PubComp {
                     packet_id: pub_rel.packet_id,
-                    reason_code: match pub_rel.reason_code {
-                        PubRelReasonCode::Success => PubCompReasonCode::Success,
-                        PubRelReasonCode::PacketIdentifierNotFound => {
-                            PubCompReasonCode::PacketIdentifierNotFound
-                        }
-                    },
+                    reason_code: PubCompReasonCode::Success,
                     properties: PubCompProperties::default(),
                 }))
                 .await?;
-
                 self.receive_in_quota += 1;
             }
             None => {
-                self.send_packet(&Packet::PubComp(PubComp {
-                    packet_id: pub_rel.packet_id,
-                    reason_code: PubCompReasonCode::PacketIdentifierNotFound,
-                    properties: PubCompProperties::default(),
-                }))
-                .await?;
+                if self.codec.protocol_level() == ProtocolLevel::V5 {
+                    self.send_packet(&Packet::PubComp(PubComp {
+                        packet_id: pub_rel.packet_id,
+                        reason_code: PubCompReasonCode::PacketIdentifierNotFound,
+                        properties: PubCompProperties::default(),
+                    }))
+                    .await?;
+                } else {
+                    return Err(Error::server_disconnect(
+                        DisconnectReasonCode::ProtocolError,
+                    ));
+                }
             }
         }
 
@@ -1036,6 +1054,7 @@ pub async fn client_loop(
         last_will: None,
         packet_id_allocator: PacketIdAllocator::default(),
         inflight_qos2_messages: FnvHashMap::default(),
+        uncompleted_messages: FnvHashMap::default(),
     };
     let mut keep_alive_interval = tokio::time::interval(Duration::from_secs(1));
 

@@ -11,7 +11,7 @@ pub enum ProtocolLevel {
     V5 = 5,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Login {
     pub username: ByteString,
     pub password: ByteString,
