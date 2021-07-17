@@ -9,7 +9,6 @@ codec = { path = "../codec", package = "rsmqtt-codec" }
 tokio = { version = "1.8.1", features = ["time", "sync", "net"] }
 bytes = "1.0.1"
 tracing = "0.1.26"
-thiserror = "1.0.26"
 bytestring = "1.0.0"
 tokio-stream = "0.1.7"
 fnv = "1.0.7"

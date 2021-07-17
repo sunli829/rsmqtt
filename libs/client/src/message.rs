@@ -3,10 +3,10 @@ use std::num::NonZeroU16;
 use bytes::Bytes;
 use bytestring::ByteString;
 use codec::{Publish, PublishProperties, Qos};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::command::{AckCommand, Command};
-use crate::{Error, Result};
+use crate::AckError;
 
 pub struct Message {
     tx_command: Option<mpsc::Sender<Command>>,
@@ -63,18 +63,20 @@ impl Message {
 }
 
 impl Message {
-    pub async fn ack(self) -> Result<()> {
+    pub async fn ack(self) -> Result<(), AckError> {
         match self.qos {
             Qos::AtMostOnce => Ok(()),
             Qos::AtLeastOnce | Qos::ExactlyOnce => {
+                let (tx_reply, rx_reply) = oneshot::channel();
                 self.tx_command
                     .unwrap()
                     .send(Command::Ack(AckCommand {
                         packet_id: self.packet_id.unwrap(),
                         qos: Qos::AtMostOnce,
+                        reply: tx_reply,
                     }))
                     .await
-                    .map_err(|_| Error::Closed)?;
+                    .map_err(|_| InternalError::Closed)?;
                 Ok(())
             }
         }

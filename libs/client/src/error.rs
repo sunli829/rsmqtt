@@ -1,43 +1,38 @@
-use codec::{
-    ConnectReasonCode, DecodeError, DisconnectReasonCode, EncodeError, PubAckReasonCode,
-    PubRecReasonCode,
-};
+use codec::PubAckReasonCode;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
-pub enum Error {
-    #[error("{0}")]
-    Connection(String),
+pub enum PublishError {
+    #[error("NoMatchingSubscribers")]
+    NoMatchingSubscribers,
 
-    #[error("encode: {0}")]
-    Encode(#[from] EncodeError),
+    #[error("NoMatchingSubscribers")]
+    UnspecifiedError,
 
-    #[error("decode: {0}")]
-    Decode(#[from] DecodeError),
+    #[error("NoMatchingSubscribers")]
+    ImplementationSpecificError,
 
-    #[error("io: {0}")]
-    Io(#[from] std::io::Error),
+    #[error("NoMatchingSubscribers")]
+    NotAuthorized,
 
-    #[error("protocol error")]
-    ProtocolError,
+    #[error("NoMatchingSubscribers")]
+    TopicNameInvalid,
 
-    #[error("disconnect by server")]
-    DisconnectByServer(Option<DisconnectReasonCode>),
+    #[error("NoMatchingSubscribers")]
+    PacketIdentifierInUse,
 
-    #[error("handshake error: {0:?}")]
-    Handshake(ConnectReasonCode),
+    #[error("NoMatchingSubscribers")]
+    QuotaExceeded,
 
-    #[error("client closed")]
-    ClientClosed,
+    #[error("NoMatchingSubscribers")]
+    PayloadFormatInvalid,
 
-    #[error("closed")]
-    Closed,
-
-    #[error("puback: {0:?}")]
-    PubAck(PubAckReasonCode),
-
-    #[error("pubrec: {0:?}")]
-    PubRec(PubRecReasonCode),
+    #[error("connection closed")]
+    ConnectionClosed,
 }
 
-pub type Result<T, E = Error> = ::std::result::Result<T, E>;
+#[derive(Debug, Error)]
+pub enum AckError {
+    #[error("connection closed")]
+    ConnectionClosed,
+}

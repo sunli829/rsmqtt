@@ -1,62 +1,59 @@
 use bytes::Bytes;
 use bytestring::ByteString;
-use codec::{PublishProperties, Qos};
+use codec::{Publish, PublishProperties, Qos};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::command::{Command, PublishCommand};
-use crate::{Error, Message, Result};
+use crate::command::{Command, PublishCommand, RequestCommand};
+use crate::Message;
 
 pub struct PublishBuilder {
     tx_command: mpsc::Sender<Command>,
-    topic: ByteString,
-    retain: bool,
-    qos: Qos,
-    payload: Bytes,
-    properties: PublishProperties,
+    publish: Publish,
 }
 
 impl PublishBuilder {
     pub(crate) fn new(tx_command: mpsc::Sender<Command>, topic: ByteString) -> Self {
         Self {
             tx_command,
-            topic,
-            retain: false,
-            qos: Qos::AtMostOnce,
-            payload: Bytes::new(),
-            properties: PublishProperties::default(),
+            publish: Publish {
+                dup: false,
+                qos: Qos::AtMostOnce,
+                retain: false,
+                topic,
+                packet_id: None,
+                properties: PublishProperties::default(),
+                payload: Bytes::default(),
+            },
         }
     }
 
     #[inline]
-    pub fn retain(self) -> Self {
-        Self {
-            retain: true,
-            ..self
-        }
+    pub fn retain(mut self) -> Self {
+        self.publish.retain = true;
+        self
     }
 
     #[inline]
-    pub fn qos(self, qos: Qos) -> Self {
-        Self { qos, ..self }
+    pub fn qos(mut self, qos: Qos) -> Self {
+        self.publish.qos = qos;
+        self
     }
 
     #[inline]
-    pub fn payload(self, payload: impl Into<Bytes>) -> Self {
-        Self {
-            payload: payload.into(),
-            ..self
-        }
+    pub fn payload(mut self, payload: impl Into<Bytes>) -> Self {
+        self.publish.payload = payload.into();
+        self
     }
 
     #[inline]
     pub fn content_type(mut self, ty: impl Into<ByteString>) -> Self {
-        self.properties.content_type = Some(ty.into());
+        self.publish.properties.content_type = Some(ty.into());
         self
     }
 
     #[inline]
     pub fn expiry_interval(mut self, seconds: u32) -> Self {
-        self.properties.message_expiry_interval = Some(seconds);
+        self.publish.properties.message_expiry_interval = Some(seconds);
         self
     }
 
@@ -66,21 +63,19 @@ impl PublishBuilder {
         name: impl Into<ByteString>,
         value: impl Into<ByteString>,
     ) -> Self {
-        self.properties
+        self.publish
+            .properties
             .user_properties
             .push((name.into(), value.into()));
         self
     }
 
     pub async fn send(self) -> Result<()> {
-        match self.qos {
+        match self.publish.qos {
             Qos::AtMostOnce => {
                 self.tx_command
                     .send(Command::Publish(PublishCommand {
-                        topic: self.topic,
-                        retain: self.retain,
-                        qos: self.qos,
-                        payload: self.payload,
+                        publish: self.publish,
                         reply: None,
                     }))
                     .await
@@ -91,10 +86,7 @@ impl PublishBuilder {
                 let (tx_reply, rx_reply) = oneshot::channel();
                 self.tx_command
                     .send(Command::Publish(PublishCommand {
-                        topic: self.topic,
-                        retain: self.retain,
-                        qos: self.qos,
-                        payload: self.payload,
+                        publish: self.publish,
                         reply: Some(tx_reply),
                     }))
                     .await
@@ -105,6 +97,14 @@ impl PublishBuilder {
     }
 
     pub async fn request(self) -> Result<Message> {
-        todo!()
+        let (tx_reply, rx_reply) = oneshot::channel();
+        self.tx_command
+            .send(Command::Request(RequestCommand {
+                publish: self.publish,
+                reply: Some(tx_reply),
+            }))
+            .await
+            .map_err(|_| Error::Closed)?;
+        rx_reply.await.map_err(|_| Error::Closed)?
     }
 }

@@ -7,8 +7,8 @@ use bytestring::ByteString;
 use codec::{
     Connect, Disconnect, Packet, PacketIdAllocator, PubAck, PubAckProperties, PubAckReasonCode,
     PubComp, PubCompProperties, PubCompReasonCode, PubRec, PubRecProperties, PubRecReasonCode,
-    PubRel, PubRelProperties, PubRelReasonCode, Publish, PublishProperties, Qos, SubAck, Subscribe,
-    SubscribeFilter, SubscribeProperties, UnsubAck, Unsubscribe,
+    PubRel, PubRelProperties, PubRelReasonCode, Publish, Qos, SubAck, Subscribe, SubscribeFilter,
+    SubscribeProperties, UnsubAck, Unsubscribe,
 };
 use fnv::FnvHashMap;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -16,15 +16,30 @@ use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Duration, Instant, Sleep};
 
-use crate::command::{AckCommand, Command, PublishCommand, SubscribeCommand, UnsubscribeCommand};
-use crate::error::Error;
-use crate::{Message, Result};
+use crate::command::{
+    AckCommand, Command, PublishCommand, RequestCommand, SubscribeCommand, UnsubscribeCommand,
+};
+use crate::Message;
 
 type Codec = codec::Codec<Box<dyn AsyncRead + Send + Unpin>, Box<dyn AsyncWrite + Send + Unpin>>;
 
-struct InflightPacket {
-    packet: Packet,
-    reply: Option<oneshot::Sender<Result<()>>>,
+enum InternalError {
+    ClientClosed,
+    ProtocolError,
+}
+
+enum Request {
+    Subscribe {
+        subscribe: Subscribe,
+    },
+    Publish {
+        publish: Publish,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    Request {
+        publish: Publish,
+        reply: oneshot::Sender<Result<Message>>,
+    },
 }
 
 struct ConnectedState {
@@ -48,6 +63,7 @@ pub struct Core {
     rx_command: mpsc::Receiver<Command>,
     subscriptions: HashMap<ByteString, SubscribeFilter>,
     tx_msg: mpsc::Sender<Message>,
+    req_id: u64,
 }
 
 impl Core {
@@ -65,6 +81,7 @@ impl Core {
             rx_command,
             subscriptions: HashMap::new(),
             tx_msg,
+            req_id: 1,
         };
         tokio::spawn(core.client_loop());
         (tx_command, rx_msg)
@@ -93,6 +110,15 @@ impl Core {
                             error = %err,
                             "connection error",
                         );
+
+                        for (_, InflightPacket { reply, .. }) in
+                            std::mem::take(&mut connected_state.inflight_packets)
+                        {
+                            if let Some(reply) = reply {
+                                //reply.send(Err(err.clone())).ok();
+                            }
+                        }
+
                         state = State::Connecting;
                     }
                 }
@@ -124,7 +150,7 @@ impl Core {
             .ok_or(Error::DisconnectByServer(None))?;
         let conn_ack = match packet {
             Packet::ConnAck(conn_ack) => conn_ack,
-            _ => return Err(Error::ProtocolError),
+            _ => anyhow::bail!("protocol error"),
         };
 
         if !conn_ack.reason_code.is_success() {
@@ -164,7 +190,7 @@ impl Core {
             res = self.rx_command.recv() => {
                 match res {
                     Some(command) => self.handle_command(connected_state, command).await,
-                    None => Err(Error::ClientClosed),
+                    None => Err(InternalError::ClientClosed),
                 }
             }
             _ = &mut connected_state.keep_alive_delay => {
@@ -208,6 +234,9 @@ impl Core {
             }
             Command::Publish(publish) => {
                 self.handle_publish_command(connected_state, publish).await
+            }
+            Command::Request(request) => {
+                self.handle_request_command(connected_state, request).await
             }
             Command::Ack(ack) => self.handle_ack_command(connected_state, ack).await,
         }
@@ -268,39 +297,59 @@ impl Core {
         connected_state: &mut ConnectedState,
         publish: PublishCommand,
     ) -> Result<()> {
-        match publish.qos {
+        match publish.publish.qos {
             Qos::AtMostOnce => {
                 connected_state
                     .codec
-                    .encode(&Packet::Publish(Publish {
-                        dup: false,
-                        qos: publish.qos,
-                        retain: publish.retain,
-                        topic: publish.topic.into(),
-                        packet_id: None,
-                        properties: PublishProperties::default(),
-                        payload: publish.payload,
-                    }))
+                    .encode(&Packet::Publish(publish.publish))
                     .await?;
                 Ok(())
             }
             Qos::AtLeastOnce | Qos::ExactlyOnce => {
                 let packet_id = connected_state.packet_id_allocator.take();
-                let packet = Packet::Publish(Publish {
-                    dup: false,
-                    qos: publish.qos,
-                    retain: publish.retain,
-                    topic: publish.topic.into(),
-                    packet_id: Some(packet_id),
-                    properties: PublishProperties::default(),
-                    payload: publish.payload,
-                });
+                let packet = Packet::Publish(publish.publish);
                 send_packet(&mut connected_state.codec, &packet).await?;
                 connected_state.inflight_packets.insert(
                     packet_id,
                     InflightPacket {
                         packet,
                         reply: publish.reply,
+                    },
+                );
+                Ok(())
+            }
+        }
+    }
+
+    async fn handle_request_command(
+        &mut self,
+        connected_state: &mut ConnectedState,
+        mut request: RequestCommand,
+    ) -> Result<()> {
+        request.publish.properties.correlation_data = {
+            let req_id = self.req_id;
+            self.req_id += 1;
+            let correlation_data = req_id.to_le_bytes();
+            Some(correlation_data.to_vec().into())
+        };
+
+        match request.publish.qos {
+            Qos::AtMostOnce => {
+                connected_state
+                    .codec
+                    .encode(&Packet::Publish(request.publish))
+                    .await?;
+                Ok(())
+            }
+            Qos::AtLeastOnce | Qos::ExactlyOnce => {
+                let packet_id = connected_state.packet_id_allocator.take();
+                let packet = Packet::Publish(request.publish);
+                send_packet(&mut connected_state.codec, &packet).await?;
+                connected_state.inflight_packets.insert(
+                    packet_id,
+                    InflightPacket {
+                        packet,
+                        reply: None,
                     },
                 );
                 Ok(())
@@ -346,7 +395,7 @@ impl Core {
         &mut self,
         connected_state: &mut ConnectedState,
         packet: Packet,
-    ) -> Result<()> {
+    ) -> Result<(), InternalError> {
         match packet {
             Packet::PingResp => Ok(()),
             Packet::Publish(publish) => self.handle_publish(connected_state, publish).await,
@@ -357,7 +406,7 @@ impl Core {
             Packet::SubAck(sub_ack) => self.handle_sub_ack(connected_state, sub_ack).await,
             Packet::UnsubAck(ubsub_ack) => self.handle_unsub_ack(connected_state, ubsub_ack).await,
             Packet::Disconnect(disconnect) => self.handle_disconnect(disconnect).await,
-            _ => Err(Error::ProtocolError),
+            _ => Err(InternalError::ProtocolError),
         }
     }
 
@@ -365,23 +414,25 @@ impl Core {
         &mut self,
         connected_state: &mut ConnectedState,
         publish: Publish,
-    ) -> Result<()> {
+    ) -> Result<(), InternalError> {
         match publish.qos {
             Qos::AtMostOnce => {
                 let msg = Message::new(None, publish);
                 self.tx_msg
                     .send(msg)
                     .await
-                    .map_err(|_| Error::ClientClosed)?;
+                    .map_err(|_| InternalError::ClientClosed)?;
                 Ok(())
             }
             Qos::AtLeastOnce => {
-                let packet_id = publish.packet_id.ok_or_else(|| Error::ProtocolError)?;
+                let packet_id = publish
+                    .packet_id
+                    .ok_or_else(|| InternalError::protocolError)?;
                 let msg = Message::new(Some(self.tx_command.clone()), publish);
                 self.tx_msg
                     .send(msg)
                     .await
-                    .map_err(|_| Error::ClientClosed)?;
+                    .map_err(|_| InternalError::ClientClosed)?;
                 send_packet(
                     &mut connected_state.codec,
                     &Packet::PubAck(PubAck {
@@ -394,7 +445,9 @@ impl Core {
                 Ok(())
             }
             Qos::ExactlyOnce => {
-                let packet_id = publish.packet_id.ok_or_else(|| Error::ProtocolError)?;
+                let packet_id = publish
+                    .packet_id
+                    .ok_or_else(|| InternalError::ProtocolError)?;
                 let msg = Message::new(Some(self.tx_command.clone()), publish);
 
                 if connected_state
@@ -448,7 +501,7 @@ impl Core {
             }
             Ok(())
         } else {
-            Err(Error::ProtocolError)
+            Err(InternalError::ProtocolError)
         }
     }
 
@@ -501,7 +554,7 @@ impl Core {
         &mut self,
         connected_state: &mut ConnectedState,
         pub_comp: PubComp,
-    ) -> Result<()> {
+    ) -> Result<(), InternalError> {
         if let Some(InflightPacket {
             packet: Packet::Publish(Publish { .. }),
             reply,
@@ -510,11 +563,11 @@ impl Core {
             if pub_comp.reason_code.is_success() {
                 reply.unwrap().send(Ok(())).ok();
             } else {
-                reply.unwrap().send(Err(Error::ProtocolError)).ok();
+                reply.unwrap().send(Err(InternalError::ProtocolError)).ok();
             }
             Ok(())
         } else {
-            Err(Error::ProtocolError)
+            Err(InternalError::ProtocolError)
         }
     }
 
@@ -522,15 +575,18 @@ impl Core {
         &mut self,
         connected_state: &mut ConnectedState,
         pub_rel: PubRel,
-    ) -> Result<()> {
+    ) -> Result<(), InternalError> {
         if let Some(msg) = connected_state
             .uncompleted_messages
             .remove(&pub_rel.packet_id)
         {
-            self.tx_msg.send(msg).await.map_err(|_| Error::Closed)?;
+            self.tx_msg
+                .send(msg)
+                .await
+                .map_err(|_| InternalError::Closed)?;
             Ok(())
         } else {
-            Err(Error::ProtocolError)
+            Err(InternalError::ProtocolError)
         }
     }
 
@@ -545,7 +601,7 @@ impl Core {
         }) = connected_state.inflight_packets.remove(&sub_ack.packet_id)
         {
             if sub_ack.reason_codes.len() != subscribe.filters.len() {
-                return Err(Error::ProtocolError);
+                return Err(InternalError::ProtocolError);
             }
             for (reason_code, filter) in sub_ack.reason_codes.into_iter().zip(subscribe.filters) {
                 if reason_code.is_success() {
@@ -565,7 +621,7 @@ impl Core {
             }
             Ok(())
         } else {
-            Err(Error::ProtocolError)
+            Err(InternalError::ProtocolError)
         }
     }
 
@@ -582,7 +638,7 @@ impl Core {
             .remove(&unsub_ack.packet_id)
         {
             if unsub_ack.reason_codes.len() != unsubscribe.filters.len() {
-                return Err(Error::ProtocolError);
+                return Err(InternalError::ProtocolError);
             }
             for (reason_code, path) in unsub_ack.reason_codes.into_iter().zip(unsubscribe.filters) {
                 if reason_code.is_success() {
@@ -600,7 +656,7 @@ impl Core {
             }
             Ok(())
         } else {
-            Err(Error::ProtocolError)
+            Err(InternalError::ProtocolError)
         }
     }
 

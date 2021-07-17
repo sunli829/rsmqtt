@@ -1,9 +1,8 @@
+use anyhow::Result;
 use bytestring::ByteString;
 use tokio::sync::mpsc;
 
 use crate::command::{Command, UnsubscribeCommand};
-use crate::error::Error;
-use crate::Result;
 
 pub struct UnsubscribeBuilder {
     tx_command: mpsc::Sender<Command>,

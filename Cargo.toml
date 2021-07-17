@@ -4,12 +4,12 @@ members = [
     "libs/service",
     "libs/testutil",
     "libs/passwd_util",
-    "libs/client",
+#    "libs/client",
 
     "libs/plugins/basic-auth",
     "libs/plugins/oso-acl",
 
     "apps/rsmqttd",
     "apps/rsmqtt_passwd",
-    "apps/rsmqtt_bench",
+#    "apps/rsmqtt_bench",
 ]

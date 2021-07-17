@@ -758,14 +758,13 @@ where
         };
 
         if !matches!(
-            self.inflight_qos2_messages.get(&pub_comp.packet_id),
+            self.inflight_qos2_messages.remove(&pub_comp.packet_id),
             Some(Qos2State::Recorded)
         ) {
             return Err(Error::server_disconnect(
                 DisconnectReasonCode::ProtocolError,
             ));
         }
-        self.inflight_qos2_messages.remove(&pub_comp.packet_id);
 
         match self
             .state

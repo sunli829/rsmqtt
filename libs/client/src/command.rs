@@ -1,11 +1,11 @@
 use std::num::NonZeroU16;
 
-use bytes::Bytes;
 use bytestring::ByteString;
-use codec::{Qos, SubscribeFilter};
+use codec::{Publish, Qos, SubscribeFilter};
 use tokio::sync::oneshot;
 
-use crate::Result;
+use crate::error::PublishError;
+use crate::{AckError, Message};
 
 pub struct SubscribeCommand {
     pub filters: Vec<SubscribeFilter>,
@@ -16,21 +16,25 @@ pub struct UnsubscribeCommand {
 }
 
 pub struct PublishCommand {
-    pub topic: ByteString,
-    pub retain: bool,
-    pub qos: Qos,
-    pub payload: Bytes,
-    pub reply: Option<oneshot::Sender<Result<()>>>,
+    pub publish: Publish,
+    pub reply: oneshot::Sender<Result<()>, PublishError>,
+}
+
+pub struct RequestCommand {
+    pub publish: Publish,
+    pub reply: oneshot::Sender<Result<Message>>,
 }
 
 pub struct AckCommand {
     pub packet_id: NonZeroU16,
     pub qos: Qos,
+    pub reply: oneshot::Sender<Result<(), AckError>>,
 }
 
 pub enum Command {
     Subscribe(SubscribeCommand),
     Unsubscribe(UnsubscribeCommand),
     Publish(PublishCommand),
+    Request(RequestCommand),
     Ack(AckCommand),
 }

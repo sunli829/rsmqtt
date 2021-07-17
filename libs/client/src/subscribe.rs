@@ -1,9 +1,9 @@
+use anyhow::Result;
 use bytestring::ByteString;
 use codec::{Qos, RetainHandling, SubscribeFilter};
 use tokio::sync::mpsc;
 
 use crate::command::{Command, SubscribeCommand};
-use crate::{Error, Result};
 
 pub struct SubscribeBuilder {
     tx_command: mpsc::Sender<Command>,

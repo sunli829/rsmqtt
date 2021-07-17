@@ -9,7 +9,7 @@ mod unsubscribe;
 
 pub use client::{Client, ClientBuilder};
 pub use codec::{ConnectReasonCode, DisconnectReasonCode, Qos, RetainHandling};
-pub use error::{Error, Result};
+pub use error::AckError;
 pub use message::Message;
 pub use publish::PublishBuilder;
 pub use subscribe::{FilterBuilder, SubscribeBuilder};

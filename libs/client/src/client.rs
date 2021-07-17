@@ -6,7 +6,7 @@ use tokio_stream::Stream;
 
 use crate::command::Command;
 use crate::core::Core;
-use crate::{Message, PublishBuilder, Result, SubscribeBuilder, UnsubscribeBuilder};
+use crate::{Message, PublishBuilder, SubscribeBuilder, UnsubscribeBuilder};
 
 pub struct ClientBuilder<A> {
     addrs: A,
